@@ -345,7 +345,7 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
     validate_block_device(&target_path, &target_partition)?;
     let partition_size = block_device_size(&File::open(&target_path)?)?;
     if !(64 * 1024 * 1024..=256 * 1024 * 1024).contains(&partition_size)
-        || partition_size % 4096 != 0
+        || !partition_size.is_multiple_of(4096)
     {
         bail!("implausible vendor_boot size: {partition_size}");
     }
