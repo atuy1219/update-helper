@@ -32,6 +32,13 @@ android {
         jniLibs.useLegacyPackaging = true
     }
 
+    lint {
+        // AndroidX lifecycle 2.9's detector is binary-incompatible with this
+        // AGP/Kotlin UAST combination and crashes lint itself. The project uses
+        // StateFlow, not MutableLiveData, so this detector is inapplicable.
+        disable += "NullSafeMutableLiveData"
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -71,4 +78,3 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
-
