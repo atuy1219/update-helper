@@ -122,7 +122,22 @@ pub fn block_device_size(file: &File) -> Result<u64> {
     }
     let mut size = 0_u64;
     // BLKGETSIZE64 is Linux's read-only block-size ioctl.
-    let rc = unsafe { libc::ioctl(file.as_raw_fd(), 0x8008_1272_u64, &mut size) };
+    #[cfg(target_os = "android")]
+    let rc = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            0x8008_1272_u32 as libc::c_int,
+            &mut size,
+        )
+    };
+    #[cfg(not(target_os = "android"))]
+    let rc = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            0x8008_1272_u64 as libc::c_ulong,
+            &mut size,
+        )
+    };
     if rc != 0 || size == 0 {
         bail!("BLKGETSIZE64 failed");
     }
