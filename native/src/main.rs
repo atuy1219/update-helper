@@ -329,10 +329,10 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
     let props = getprop_all()?;
     let current_slot = current_slot(&props)?;
     let next_boot_slot = next_boot_slot()?;
-    if let Some(slot) = requested_slot {
-        if slot != next_boot_slot {
-            bail!("requested slot {slot} is not bootctl active boot slot {next_boot_slot}");
-        }
+    if let Some(slot) = requested_slot
+        && slot != next_boot_slot
+    {
+        bail!("requested slot {slot} is not bootctl active boot slot {next_boot_slot}");
     }
     if requested_slot.is_some() && current_slot == next_boot_slot {
         bail!("next boot slot equals current slot; OTA-pending state not detected");
@@ -482,6 +482,7 @@ fn operation_lock() -> Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(LOCK_PATH)?;
     lock.try_lock_exclusive()
         .context("another operation is already running")?;
