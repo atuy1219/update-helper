@@ -104,7 +104,9 @@ pub fn ensure_write_target(current_slot: char, target_slot: char, name: &str) ->
 }
 
 pub fn validate_partition_size(size: u64, image_size: u64) -> Result<()> {
-    if !(64 * 1024 * 1024..=256 * 1024 * 1024).contains(&size) || size % 4096 != 0 {
+    if !(64 * 1024 * 1024..=256 * 1024 * 1024).contains(&size)
+        || !size.is_multiple_of(4096)
+    {
         bail!("vendor_boot partition size is implausible: {size}");
     }
     if size != image_size {
