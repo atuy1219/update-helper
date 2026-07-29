@@ -134,7 +134,6 @@ fn vendor_boot(specs: &[(&str, Option<Region>)]) -> Vec<u8> {
 fn fdt(compatible: &str, region: Option<Region>) -> Vec<u8> {
     const BEGIN: u32 = 1;
     const END_NODE: u32 = 2;
-    const PROP: u32 = 3;
     const END: u32 = 9;
     let strings = b"compatible\0region,country\0";
     let mut structure = Vec::new();
