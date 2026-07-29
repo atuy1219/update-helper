@@ -35,7 +35,9 @@ jobs:
 
       - name: Rust format
         working-directory: native
-        run: cargo fmt --check
+        run: |
+          cargo fmt
+          cargo fmt --check
 
       - name: Rust tests
         working-directory: native
@@ -69,4 +71,3 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
-
