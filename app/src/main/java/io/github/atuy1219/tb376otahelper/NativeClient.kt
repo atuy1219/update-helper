@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.io.IOException
 
 class NativeClient(private val context: Context) {
     companion object {
@@ -46,7 +47,8 @@ class NativeClient(private val context: Context) {
         execute("verify", "--slot", slot, "--image", image, "--json")
 
     suspend fun journal(): JsonObject? = withContext(Dispatchers.IO) {
-        val result = rootExec("/system/bin/cat", STATE)
+        val result = runCatching { rootExec("/system/bin/cat", STATE) }.getOrNull()
+            ?: return@withContext null
         if (result.exitCode == 0) runCatching { json.parseToJsonElement(result.stdout).jsonObject }.getOrNull()
         else null
     }
@@ -56,11 +58,7 @@ class NativeClient(private val context: Context) {
     }
 
     private suspend fun execute(vararg args: String): NativeResult = withContext(Dispatchers.IO) {
-        val command = mutableListOf("su", "0", BINARY)
-        command.addAll(args)
-        val process = ProcessBuilder(command)
-            .redirectErrorStream(false)
-            .start()
+        val process = startRootProcess(listOf("0", BINARY) + args)
         val stdout = process.inputStream.bufferedReader().readLines()
         val stderr = process.errorStream.bufferedReader().readText()
         val exit = process.waitFor()
@@ -79,18 +77,56 @@ class NativeClient(private val context: Context) {
     }
 
     private fun rootExec(vararg args: String): ProcessResult {
-        val command = mutableListOf("su", "0")
-        command.addAll(args)
-        val process = ProcessBuilder(command).start()
+        val process = startRootProcess(listOf("0") + args)
         val stdout = process.inputStream.bufferedReader().readText()
         val stderr = process.errorStream.bufferedReader().readText()
         return ProcessResult(process.waitFor(), stdout, stderr)
+    }
+
+    private fun startRootProcess(arguments: List<String>): Process {
+        var lastNotFound: IOException? = null
+        for (su in suCandidates(System.getenv("PATH"))) {
+            try {
+                return ProcessBuilder(listOf(su) + arguments)
+                    .redirectErrorStream(false)
+                    .start()
+            } catch (error: IOException) {
+                if (!isCommandNotFound(error)) throw error
+                lastNotFound = error
+            }
+        }
+        throw RootUnavailableException(
+            "KernelSUのsuを検出できません。KernelSU Nextの設定で「SU compatibility」を有効にし、" +
+                "本アプリへのroot許可を確認してください",
+            lastNotFound,
+        )
     }
 
     private fun ProcessResult.requireSuccess() {
         check(exitCode == 0) { stderr.ifBlank { "root command failed ($exitCode)" } }
     }
 }
+
+internal fun suCandidates(path: String?): List<String> =
+    (
+        listOf(
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/debug_ramdisk/su",
+        ) +
+            path.orEmpty()
+                .split(File.pathSeparatorChar)
+                .filter { it.isNotBlank() }
+                .map { "$it/su" } +
+            "su"
+        ).distinct()
+
+private fun isCommandNotFound(error: IOException): Boolean =
+    error.message?.let { "error=2" in it || "No such file or directory" in it } == true
+
+private class RootUnavailableException(message: String, cause: Throwable?) :
+    IOException(message, cause)
 
 data class NativeResult(
     val exitCode: Int,
