@@ -3,6 +3,7 @@ package io.github.atuy1219.tb376otahelper
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -53,6 +54,28 @@ class SafetyPolicyTest {
         assertTrue(isSafeBackupDir("/data/adb/tb376-ota-helper/backups/123-slot-b"))
         assertFalse(isSafeBackupDir("/data/local/tmp/123-slot-b"))
         assertFalse(isSafeBackupDir("/data/adb/tb376-ota-helper/backups/../state"))
+    }
+
+    @Test
+    fun suResolutionUsesAbsoluteAndroidPathsBeforePathAndFallback() {
+        assertEquals(
+            listOf(
+                "/system/bin/su",
+                "/system/xbin/su",
+                "/sbin/su",
+                "/debug_ramdisk/su",
+                "/vendor/bin/su",
+                "/product/bin/su",
+                "su",
+            ),
+            suCandidates("/vendor/bin:/product/bin"),
+        )
+    }
+
+    @Test
+    fun suResolutionRemovesDuplicatePathCandidates() {
+        val candidates = suCandidates("/system/bin:/system/bin")
+        assertEquals(1, candidates.count { it == "/system/bin/su" })
     }
 
     private fun state(
