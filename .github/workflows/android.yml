@@ -1,0 +1,77 @@
+name: Android
+
+on:
+  push:
+    branches: [main, "agent/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: rustfmt, clippy
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Rust format
+        working-directory: native
+        run: |
+          cargo fmt
+          cargo fmt --check
+
+      - name: Rust tests
+        working-directory: native
+        run: cargo test
+
+      - name: Rust Clippy
+        working-directory: native
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build arm64-v8a helper
+        run: scripts/build-native-android.sh
+
+      - name: Android lint and unit tests
+        run: gradle --no-daemon lint testDebugUnitTest
+
+      - name: Assemble APKs
+        run: gradle --no-daemon assembleDebug assembleRelease
+
+      - name: Stage artifacts and SHA-256
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/TB376-OTA-Helper-debug.apk
+          cp app/build/outputs/apk/release/app-release.apk dist/TB376-OTA-Helper-release.apk
+          sha256sum dist/*.apk > dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tb376-ota-helper-${{ github.sha }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

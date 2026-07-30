@@ -3,7 +3,8 @@
 TB376 OTA Helper is an offline Android application for one fixed device
 profile: an officially unlocked Lenovo TB376FC (`product=malbec`,
 `hwboardid=SM8735P_8+128_22`) running TB390FU/TB390FU_PRC ROW ZUI with KernelSU
-Next LKM.
+Next LKM. KernelSU Next's **SU compatibility** setting must be enabled so the
+app can request its explicitly approved root process.
 
 Use it only after a normal ZUI A/B OTA has finished installing and the system
 is waiting for a reboot. It backs up and patches only the next boot slot's
@@ -43,4 +44,3 @@ require this flow.
 
 The app requests no Internet, location, contact, phone, advertising ID, or
 analytics permission. It sends no device information or logs off the tablet.
-
