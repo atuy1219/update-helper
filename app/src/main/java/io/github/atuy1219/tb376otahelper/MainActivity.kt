@@ -58,6 +58,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
         return
     }
 
+    var otaPrepConfirm by remember { mutableStateOf(false) }
     var currentStockConfirm by remember { mutableStateOf(false) }
     var patchConfirm by remember { mutableStateOf(false) }
     var rebootConfirm by remember { mutableStateOf(false) }
@@ -74,11 +75,21 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
     ) {
         Text("TB376 OTA Helper", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "OTA開始前は必要に応じて現在OSのstock vendor_bootを復元できます。OTA適用後は「再起動してください」で止め、更新先vendor_bootだけをPRC化します。vbmeta・boot・init_boot・superには触れません。",
+            "差分OTA前は「差分OTA準備」でKernelSU Nextが変更したinit_boot/bootと現在OSのvendor_bootをstockへ戻して全体検証します。OTA適用後は「再起動してください」で止め、更新先vendor_bootだけをPRC化します。vbmeta・superには触れません。",
             style = MaterialTheme.typography.bodyMedium,
         )
 
         StatusCard(state)
+
+        if (state.otaReady) {
+            Card(Modifier.fillMaxWidth()) {
+                Text(
+                    "差分OTA準備完了。ここでは再起動せず、ZUIのOTAを開始してください。",
+                    modifier = Modifier.padding(12.dp),
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
 
         if (state.busy) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -104,6 +115,12 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("端末を検査") }
 
+        Button(
+            onClick = { otaPrepConfirm = true },
+            enabled = canPrepareIncrementalOta(state),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("差分OTA準備（stockへ一括復元）") }
+
         OutlinedButton(
             onClick = { currentStockConfirm = true },
             enabled = canRestoreCurrentStock(state),
@@ -115,7 +132,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
                 ) {
                     "現在OSのvendor_bootはstock ROW"
                 } else {
-                    "現在OSのstock vendor_bootを復元"
+                    "現在OSのstock vendor_bootだけを復元"
                 },
             )
         }
@@ -167,12 +184,35 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
         )
     }
 
+    if (otaPrepConfirm) {
+        AlertDialog(
+            onDismissRequest = { otaPrepConfirm = false },
+            title = { Text("差分OTA用に現在slotをstockへ戻します") },
+            text = {
+                Text(
+                    "KernelSU Nextのboot-restoreで現在のinit_boot/bootに埋め込まれたstock_image.sha1を読み、" +
+                        "実在する /data/adb/ksu/ksun_backup_* と完全一致するcandidateだけを現在slotへ書き戻してSHA-256読戻し検証します。" +
+                        "KernelSUが再構築しただけのイメージは使用しません。その後vendor_bootもHelperの対応バックアップからstock ROWへ復元します。" +
+                        "完了後は再起動せずOTAを開始してください。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    otaPrepConfirm = false
+                    vm.prepareIncrementalOta()
+                }) { Text("差分OTA準備を実行") }
+            },
+            dismissButton = {
+                TextButton(onClick = { otaPrepConfirm = false }) { Text("キャンセル") }
+            },
+        )
+    }
     if (currentStockConfirm) {
         AlertDialog(
             onDismissRequest = { currentStockConfirm = false },
             title = { Text("現在OSのvendor_bootをstockへ戻します") },
             text = {
-                Text("OTA開始前専用です。現在slotのvendor_bootが、過去にこのHelperが生成したPRCイメージとSHA-256完全一致する場合だけ、対応するstockバックアップを現在slotへ書き戻し、全体を再検証します。")
+                Text("OTA開始前専用です。現在slotのvendor_bootが、過去にこのHelperが生成したPRCイメージとSHA-256完全一致する場合だけ、対応するstockバックアップを現在slotへ書き戻し、全体を再検証します。KernelSU側は処理しません。")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -207,7 +247,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
         AlertDialog(
             onDismissRequest = { rebootConfirm = false },
             title = { Text("再起動の最終確認") },
-            text = { Text("KernelSU Nextの「非アクティブスロットにインストール」も完了しましたか？本アプリはinit_bootを確認・変更しません。") },
+            text = { Text("OTA後の新しい非アクティブスロットへのKernelSU Next再導入は完了しましたか？差分OTA準備でstockへ戻したのは旧・現在slotです。") },
             confirmButton = {
                 TextButton(onClick = {
                     rebootConfirm = false
@@ -241,6 +281,9 @@ private fun StatusCard(state: UiState) {
             Status("OTA再起動待ち", if (d != null && d.string("current_slot") != d.string("next_boot_slot")) "Yes" else "No/未検査")
             Status("KernelSU Next", if (state.kernelsuPackages.isNotEmpty()) "Manager検出" else "確認できません")
             Status("KernelSUカーネル状態", d?.bool("kernelsu_next_present")?.let { if (it) "検出" else "確認できません" } ?: "—")
+            Status("差分OTA準備", if (state.otaReady) "完了 / 再起動せずOTA開始" else "未完了")
+            Status("KSU stock復元対象", state.ksuStockPartition ?: "—")
+            Status("KSU stock SHA-256", state.ksuStockSha256 ?: "—")
             Status("バッテリー", d?.string("battery_percent")?.let { "$it% / ${if (d.bool("charging") == true) "充電中" else "未充電"}" } ?: "—")
             Status("update_engine", d?.string("ota_status") ?: "利用不可")
             Status("vendor_bootリージョン", state.fdt?.string("region") ?: if (op?.bool("already_prc") == true) "PRC" else "—")
