@@ -16,6 +16,12 @@ use tb376_ota_helper_native::{
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+const BOOTCTL_CANDIDATES: &[&str] = &[
+    "/system/bin/bootctl",
+    "/vendor/bin/bootctl",
+    "/system_ext/bin/bootctl",
+    "/data/adb/ksu/bin/bootctl",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeviceInfo {
@@ -785,7 +791,7 @@ fn prop(props: &[(String, String)], key: &str) -> Option<String> {
 
 fn current_slot(props: &[(String, String)]) -> Result<char> {
     let prop_slot = prop(props, "ro.boot.slot_suffix").and_then(|v| normalize_slot(&v));
-    let bootctl_slot = command_output("/system/bin/bootctl", &["get-current-slot"])
+    let bootctl_slot = bootctl_output(&["get-current-slot"])
         .ok()
         .and_then(|v| normalize_slot(&v));
     match (prop_slot, bootctl_slot) {
@@ -796,7 +802,7 @@ fn current_slot(props: &[(String, String)]) -> Result<char> {
 }
 
 fn next_boot_slot() -> Result<char> {
-    let value = command_output("/system/bin/bootctl", &["get-active-boot-slot"])
+    let value = bootctl_output(&["get-active-boot-slot"])
         .context("bootctl get-active-boot-slot failed")?;
     normalize_slot(&value).context("cannot determine next boot slot")
 }
@@ -838,6 +844,26 @@ fn detect_hwboardid(props: &[(String, String)]) -> Result<String> {
         }
     }
     bail!("cannot verify hwboardid={EXPECTED_HWBOARD_ID}")
+}
+
+fn bootctl_output(args: &[&str]) -> Result<String> {
+    let mut errors = Vec::new();
+    for program in BOOTCTL_CANDIDATES {
+        if !Path::new(program).is_file() {
+            continue;
+        }
+        match command_output(program, args) {
+            Ok(output) => return Ok(output),
+            Err(error) => errors.push(format!("{program}: {error:#}")),
+        }
+    }
+    if errors.is_empty() {
+        bail!(
+            "bootctl not found; checked {}",
+            BOOTCTL_CANDIDATES.join(", ")
+        );
+    }
+    bail!("all bootctl candidates failed: {}", errors.join("; "))
 }
 
 fn command_output(program: &str, args: &[&str]) -> Result<String> {
