@@ -69,6 +69,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val slot = device.string("current_slot") ?: error("current slot不明")
         val next = device.string("next_boot_slot") ?: error("next boot slot不明")
         check(slot == next) { "OTA再起動待ち状態では差分OTA準備を実行できません" }
+        check(isUpdateEngineIdle(device)) {
+            "update_engineがIDLEではありません。OTAのダウンロード/適用中は現在slotを変更できません"
+        }
         val fingerprint = device.string("build_fingerprint") ?: error("build fingerprint不明")
         check(device.bool("supported_device") == true && device.bool("bootloader_unlocked") == true) {
             "対応端末・Unlocked条件を満たしていません"
@@ -97,6 +100,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val verifiedFdt = data.obj("fdt") ?: error("vendor_boot FDT verification missing")
         check(verifiedDevice.string("current_slot") == verifiedDevice.string("next_boot_slot")) {
             "処理中にnext boot slotが変更されました"
+        }
+        check(isUpdateEngineIdle(verifiedDevice)) {
+            "処理中にupdate_engineがIDLE以外へ遷移しました。OTAを開始せず状態を確認してください"
         }
         check(verifiedFdt.string("region") == "ROW") {
             "vendor_bootがstock ROWとして確認できません"
@@ -200,6 +206,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun performCurrentStockRestore() {
+        val device = _state.value.device ?: error("先に端末を検査してください")
+        check(isUpdateEngineIdle(device)) {
+            "update_engineがIDLEではありません。OTA適用中は現在slotのvendor_bootを変更できません"
+        }
         val result = native.restoreCurrentStock()
         check(result.isSuccess) { result.error ?: "current stock restore failed" }
         val data = result.result!!
@@ -265,6 +275,11 @@ fun isRecoveryRequired(journal: JsonObject): Boolean =
 fun JsonObject.bool(name: String): Boolean? =
     this[name]?.jsonPrimitive?.booleanOrNull
 
+fun isUpdateEngineIdle(device: JsonObject): Boolean =
+    device.string("ota_status")
+        ?.uppercase()
+        ?.contains("UPDATE_STATUS_IDLE") == true
+
 fun canPatch(state: UiState): Boolean {
     val device = state.device ?: return false
     return !state.busy &&
@@ -283,6 +298,7 @@ fun canPrepareIncrementalOta(state: UiState): Boolean {
         device.bool("bootloader_unlocked") == true &&
         device.bool("supported_device") == true &&
         device.bool("kernelsu_next_present") == true &&
+        isUpdateEngineIdle(device) &&
         device.string("current_slot") in setOf("a", "b") &&
         device.string("current_slot") == device.string("next_boot_slot") &&
         state.fdt?.string("region") in setOf("ROW", "PRC")
@@ -294,6 +310,7 @@ fun canRestoreCurrentStock(state: UiState): Boolean {
         state.rootAvailable == true &&
         device.bool("bootloader_unlocked") == true &&
         device.bool("supported_device") == true &&
+        isUpdateEngineIdle(device) &&
         device.string("current_slot") in setOf("a", "b") &&
         device.string("current_slot") == device.string("next_boot_slot") &&
         state.fdt?.string("region") == "PRC"
