@@ -142,7 +142,7 @@ class NativeClient(private val context: Context) {
 
                 val backupMatch = KSU_BACKUP_LINE.find(restore.stdout)
                     ?: error(
-                        "KernelSU Nextは$partitionNameを復元可能と判定しましたが、" +
+                        "KernelSU Nextは${partitionName}を復元可能と判定しましたが、" +
                             "元のstockバックアップを使用していません。差分OTA用なので再構築イメージは書き込みません",
                     )
                 val backup = backupMatch.groupValues[1]
