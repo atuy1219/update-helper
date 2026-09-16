@@ -16,12 +16,8 @@ use tb376_ota_helper_native::{
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BOOTCTL_CANDIDATES: &[&str] = &[
-    "/system/bin/bootctl",
-    "/vendor/bin/bootctl",
-    "/system_ext/bin/bootctl",
-    "/data/adb/ksu/bin/bootctl",
-];
+const OTA_IDLE: &str = "UPDATE_STATUS_IDLE";
+const OTA_UPDATED_NEED_REBOOT: &str = "UPDATE_STATUS_UPDATED_NEED_REBOOT";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeviceInfo {
@@ -436,6 +432,12 @@ fn validate_current_restore_device(device: &DeviceInfo) -> Result<()> {
             device.bootloader_unlocked
         );
     }
+    if device.ota_status.as_deref() != Some(OTA_IDLE) {
+        bail!(
+            "update_engine is not IDLE; current stock restore is prohibited while OTA is active: {}",
+            device.ota_status.as_deref().unwrap_or("unknown")
+        );
+    }
     if device.current_slot != device.next_boot_slot {
         bail!("OTA-pending state detected; current stock restore must be completed before starting the OTA");
     }
@@ -567,14 +569,22 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
     }
     let props = getprop_all()?;
     let current_slot = current_slot(&props)?;
-    let next_boot_slot = next_boot_slot()?;
+    let ota_status = update_engine_status()?;
+    let next_boot_slot = next_boot_slot_from_ota(current_slot, &ota_status);
     if let Some(slot) = requested_slot
         && slot != next_boot_slot
     {
-        bail!("requested slot {slot} is not bootctl active boot slot {next_boot_slot}");
+        bail!(
+            "requested slot {slot} does not match OTA target slot {next_boot_slot} derived from update_engine={ota_status}"
+        );
+    }
+    if requested_slot.is_some() && ota_status != OTA_UPDATED_NEED_REBOOT {
+        bail!(
+            "inactive-slot operation requires {OTA_UPDATED_NEED_REBOOT}; current update_engine status is {ota_status}"
+        );
     }
     if requested_slot.is_some() && current_slot == next_boot_slot {
-        bail!("next boot slot equals current slot; OTA-pending state not detected");
+        bail!("next boot slot equals current slot; completed A/B OTA is not detected");
     }
     let target_partition = partition_name(next_boot_slot)?.to_string();
     if requested_slot.is_some() {
@@ -658,7 +668,7 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
         serial: prop(&props, "ro.serialno").unwrap_or_default(),
         battery_percent,
         charging,
-        ota_status: command_output("/system/bin/update_engine_client", &["--status"]).ok(),
+        ota_status: Some(ota_status),
         kernelsu_next_present: Path::new("/sys/kernel/ksu").exists()
             || Path::new("/data/adb/ksu").exists(),
         supported_device,
@@ -790,21 +800,60 @@ fn prop(props: &[(String, String)], key: &str) -> Option<String> {
 }
 
 fn current_slot(props: &[(String, String)]) -> Result<char> {
-    let prop_slot = prop(props, "ro.boot.slot_suffix").and_then(|v| normalize_slot(&v));
-    let bootctl_slot = bootctl_output(&["get-current-slot"])
-        .ok()
-        .and_then(|v| normalize_slot(&v));
-    match (prop_slot, bootctl_slot) {
-        (Some(a), Some(b)) if a != b => bail!("slot sources disagree: {a}/{b}"),
-        (Some(slot), _) | (_, Some(slot)) => Ok(slot),
-        _ => bail!("cannot determine current slot"),
+    ["ro.boot.slot_suffix", "ro.boot.slot"]
+        .iter()
+        .filter_map(|key| prop(props, key))
+        .find_map(|value| normalize_slot(&value))
+        .context("cannot determine current slot from ro.boot.slot_suffix/ro.boot.slot")
+}
+
+fn next_boot_slot_from_ota(current_slot: char, ota_status: &str) -> char {
+    if ota_status == OTA_UPDATED_NEED_REBOOT {
+        opposite_slot(current_slot)
+    } else {
+        current_slot
     }
 }
 
-fn next_boot_slot() -> Result<char> {
-    let value = bootctl_output(&["get-active-boot-slot"])
-        .context("bootctl get-active-boot-slot failed")?;
-    normalize_slot(&value).context("cannot determine next boot slot")
+fn opposite_slot(slot: char) -> char {
+    match slot {
+        'a' => 'b',
+        'b' => 'a',
+        _ => slot,
+    }
+}
+
+fn update_engine_status() -> Result<String> {
+    let output = Command::new("/system/bin/toybox")
+        .args([
+            "timeout",
+            "2",
+            "/system/bin/update_engine_client",
+            "--follow",
+        ])
+        .output()
+        .context("cannot run update_engine_client --follow")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    parse_update_engine_status(&combined).with_context(|| {
+        format!(
+            "update_engine status callback was not received (exit={:?}): {}",
+            output.status.code(),
+            combined.trim()
+        )
+    })
+}
+
+fn parse_update_engine_status(text: &str) -> Option<String> {
+    const MARKER: &str = "onStatusUpdate(";
+    text.lines().find_map(|line| {
+        let start = line.find(MARKER)? + MARKER.len();
+        let status = line[start..].split_whitespace().next()?;
+        status
+            .starts_with("UPDATE_STATUS_")
+            .then(|| status.to_string())
+    })
 }
 
 fn normalize_slot(value: &str) -> Option<char> {
@@ -844,26 +893,6 @@ fn detect_hwboardid(props: &[(String, String)]) -> Result<String> {
         }
     }
     bail!("cannot verify hwboardid={EXPECTED_HWBOARD_ID}")
-}
-
-fn bootctl_output(args: &[&str]) -> Result<String> {
-    let mut errors = Vec::new();
-    for program in BOOTCTL_CANDIDATES {
-        if !Path::new(program).is_file() {
-            continue;
-        }
-        match command_output(program, args) {
-            Ok(output) => return Ok(output),
-            Err(error) => errors.push(format!("{program}: {error:#}")),
-        }
-    }
-    if errors.is_empty() {
-        bail!(
-            "bootctl not found; checked {}",
-            BOOTCTL_CANDIDATES.join(", ")
-        );
-    }
-    bail!("all bootctl candidates failed: {}", errors.join("; "))
 }
 
 fn command_output(program: &str, args: &[&str]) -> Result<String> {
@@ -934,4 +963,26 @@ fn read_journal() -> Option<Operation> {
 
 fn emit(kind: &str, value: Value) {
     println!("{}", json!({"type": kind, "data": value}));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tb390fu_update_engine_follow_output() {
+        let output = "[INFO:update_engine_client_android.cc(96)] onStatusUpdate(UPDATE_STATUS_IDLE (0), 0)\n";
+        assert_eq!(parse_update_engine_status(output).as_deref(), Some(OTA_IDLE));
+    }
+
+    #[test]
+    fn derives_ota_target_without_bootctl() {
+        assert_eq!(next_boot_slot_from_ota('a', OTA_IDLE), 'a');
+        assert_eq!(next_boot_slot_from_ota('a', OTA_UPDATED_NEED_REBOOT), 'b');
+        assert_eq!(next_boot_slot_from_ota('b', OTA_UPDATED_NEED_REBOOT), 'a');
+        assert_eq!(
+            next_boot_slot_from_ota('b', "UPDATE_STATUS_DOWNLOADING"),
+            'b'
+        );
+    }
 }
