@@ -43,6 +43,9 @@ class NativeClient(private val context: Context) {
     suspend fun restore(slot: String, backup: String): NativeResult =
         execute("restore", "--slot", slot, "--backup", backup, "--json")
 
+    suspend fun restoreCurrentStock(): NativeResult =
+        execute("restore-current-stock", "--json")
+
     suspend fun verify(slot: String, image: String): NativeResult =
         execute("verify", "--slot", slot, "--image", image, "--json")
 

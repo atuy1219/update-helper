@@ -91,9 +91,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun restoreCurrentStock() = launchOperation("現在OSのstock vendor_bootを復元中") {
+        performCurrentStockRestore()
+    }
+
     fun restore() = launchOperation("stockバックアップを復元中") {
         val operation = _state.value.recoveryJournal ?: _state.value.operation
             ?: error("復元journalがありません")
+        if (operation.string("status")?.startsWith("current_stock_restore_") == true) {
+            performCurrentStockRestore()
+            return@launchOperation
+        }
         val slot = operation.string("next_boot_slot") ?: error("slot不明")
         val dir = operation.string("backup_dir") ?: error("backup不明")
         val result = native.restore(slot, "$dir/vendor_boot_${slot}-stock.img")
@@ -129,6 +137,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
         return true
+    }
+
+    private suspend fun performCurrentStockRestore() {
+        val result = native.restoreCurrentStock()
+        check(result.isSuccess) { result.error ?: "current stock restore failed" }
+        val data = result.result!!
+        val alreadyStock = data.bool("already_stock") == true
+        _state.value = _state.value.copy(
+            device = data.obj("device") ?: _state.value.device,
+            fdt = data.obj("fdt") ?: _state.value.fdt,
+            operation = data.obj("operation") ?: _state.value.operation,
+            recoveryJournal = null,
+            status = if (alreadyStock) {
+                "現在OSのvendor_bootは既にstock ROWです。書き込みは行っていません"
+            } else {
+                "現在OSのstock vendor_bootを復元し、全体SHA-256を検証しました"
+            },
+            error = null,
+        )
     }
 
     private fun launchOperation(label: String, block: suspend () -> Unit) {
@@ -170,6 +197,7 @@ fun isRecoveryRequired(journal: JsonObject): Boolean =
         "success_already_prc",
         "restore_success",
         "dry_run_success",
+        "current_stock_restore_success",
     )
 
 fun JsonObject.bool(name: String): Boolean? =
@@ -184,6 +212,17 @@ fun canPatch(state: UiState): Boolean {
         device.string("current_slot") != device.string("next_boot_slot") &&
         device.string("next_boot_slot") in setOf("a", "b") &&
         state.operation?.string("status") == "dry_run_success"
+}
+
+fun canRestoreCurrentStock(state: UiState): Boolean {
+    val device = state.device ?: return false
+    return !state.busy &&
+        state.rootAvailable == true &&
+        device.bool("bootloader_unlocked") == true &&
+        device.bool("supported_device") == true &&
+        device.string("current_slot") in setOf("a", "b") &&
+        device.string("current_slot") == device.string("next_boot_slot") &&
+        state.fdt?.string("region") == "PRC"
 }
 
 fun canReboot(state: UiState): Boolean {

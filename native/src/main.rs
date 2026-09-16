@@ -10,7 +10,7 @@ use std::process::Command;
 use tb376_ota_helper_native::{
     atomic_json, block_device_size, ensure_write_target, inspect_image, inspect_image_sized,
     partition_name, partition_path, patch_image, sha256_file, stream_copy_exact, stream_hash,
-    validate_block_device, validate_partition_size, PatchReport, BACKUP_DIR,
+    validate_block_device, validate_partition_size, PatchReport, Region, BACKUP_DIR,
     EXPECTED_HWBOARD_ID, EXPECTED_PRODUCT, LOCK_PATH, ROOT_DIR, STATE_PATH,
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -112,6 +112,7 @@ fn run() -> Result<()> {
             slot.context("--slot is required")?,
             backup.context("--backup is required")?,
         )?,
+        "restore-current-stock" => restore_current_stock()?,
         "verify" => verify(
             slot.context("--slot is required")?,
             image.context("--image is required")?,
@@ -232,6 +233,238 @@ fn restore(slot: char, backup: PathBuf) -> Result<()> {
     }
 }
 
+fn restore_current_stock() -> Result<()> {
+    let _lock = operation_lock()?;
+    emit("progress", json!({"step": "current_slot_validation"}));
+    let device = inspect_device(None)?;
+    validate_current_restore_device(&device)?;
+    enforce_battery(&device)?;
+
+    let current_hash = hash_partition(&device)?;
+    let recovery = read_journal().filter(|operation| {
+        operation.status.starts_with("current_stock_restore_")
+            && operation.status != "current_stock_restore_success"
+    });
+
+    let mut operation = if let Some(mut operation) = recovery {
+        let backup_dir = PathBuf::from(&operation.backup_dir);
+        validate_current_restore_backup(&device, &backup_dir, &operation, None)?;
+        if current_hash == operation.input_sha256 {
+            operation.write_started = true;
+            operation.write_completed = true;
+            operation.readback_verified = true;
+            operation.restore_attempted = true;
+            operation.restore_verified = true;
+            operation.status = "current_stock_restore_success".to_string();
+            operation.error = None;
+            atomic_json(Path::new(STATE_PATH), &operation)?;
+            let fdt = inspect_image_sized(Path::new(&device.target_path), device.partition_size)?;
+            emit(
+                "result",
+                json!({"device": device, "fdt": fdt, "operation": operation, "readback_sha256": current_hash}),
+            );
+            return Ok(());
+        }
+        operation
+    } else {
+        let fdt = inspect_image_sized(Path::new(&device.target_path), device.partition_size)?;
+        if fdt.region == Region::Row {
+            emit(
+                "result",
+                json!({"device": device, "fdt": fdt, "already_stock": true, "readback_sha256": current_hash}),
+            );
+            return Ok(());
+        }
+        if fdt.region != Region::Prc {
+            bail!("current vendor_boot is not a supported PRC image");
+        }
+        let mut operation = find_current_stock_backup(&device, &current_hash)?;
+        operation.tool_version = TOOL_VERSION.to_string();
+        operation.timestamp = now();
+        operation.serial = device.serial.clone();
+        operation.product = device.product.clone();
+        operation.hwboardid = device.hwboardid.clone();
+        operation.current_slot = device.current_slot.to_string();
+        operation.next_boot_slot = device.current_slot.to_string();
+        operation.target_partition = partition_name(device.current_slot)?.to_string();
+        operation.build_fingerprint = device.build_fingerprint.clone();
+        operation.kernel_release = device.kernel_release.clone();
+        operation.write_started = false;
+        operation.write_completed = false;
+        operation.readback_verified = false;
+        operation.restore_attempted = false;
+        operation.restore_verified = false;
+        operation.status = "current_stock_restore_prepared".to_string();
+        operation.error = None;
+        operation
+    };
+
+    let backup_dir = PathBuf::from(&operation.backup_dir);
+    validate_current_restore_backup(&device, &backup_dir, &operation, None)?;
+    let stock = backup_dir.join(stock_name(device.current_slot));
+
+    operation.write_started = true;
+    operation.write_completed = false;
+    operation.readback_verified = false;
+    operation.restore_attempted = true;
+    operation.restore_verified = false;
+    operation.status = "current_stock_restore_writing".to_string();
+    operation.error = None;
+    atomic_json(Path::new(STATE_PATH), &operation)?;
+    emit("progress", json!({"step": "restore_current_vendor_boot"}));
+
+    match write_current_and_verify(&device, &stock, &operation.input_sha256) {
+        Ok(()) => {
+            operation.write_completed = true;
+            operation.readback_verified = true;
+            operation.restore_verified = true;
+            operation.status = "current_stock_restore_success".to_string();
+            operation.error = None;
+            atomic_json(Path::new(STATE_PATH), &operation)?;
+            let fdt = inspect_image_sized(Path::new(&device.target_path), device.partition_size)?;
+            emit(
+                "result",
+                json!({"device": device, "fdt": fdt, "operation": operation, "readback_sha256": operation.input_sha256}),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            operation.write_completed = false;
+            operation.readback_verified = false;
+            operation.restore_verified = false;
+            operation.status = "current_stock_restore_failed_do_not_reboot".to_string();
+            operation.error = Some(format!("{error:#}"));
+            atomic_json(Path::new(STATE_PATH), &operation)?;
+            bail!("現在slotのstock vendor_boot復元に失敗しました 再起動しないでください: {error:#}")
+        }
+    }
+}
+
+fn find_current_stock_backup(device: &DeviceInfo, current_hash: &str) -> Result<Operation> {
+    let backup_root = Path::new(BACKUP_DIR);
+    if !backup_root.is_dir() {
+        bail!("stock backup directory does not exist: {BACKUP_DIR}");
+    }
+    for entry in fs::read_dir(backup_root)? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let operation: Operation = match fs::read(dir.join("operation.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(operation) => operation,
+            None => continue,
+        };
+        if validate_current_restore_backup(device, &dir, &operation, Some(current_hash)).is_ok() {
+            return Ok(operation);
+        }
+    }
+    bail!(
+        "現在のvendor_boot SHA-256に一致するHelper生成済みPRCバックアップがありません。stockを推測して書き込むことはしません"
+    )
+}
+
+fn validate_current_restore_backup(
+    device: &DeviceInfo,
+    backup_dir: &Path,
+    operation: &Operation,
+    expected_patched_hash: Option<&str>,
+) -> Result<()> {
+    validate_backup_dir(backup_dir, true)?;
+    if Path::new(&operation.backup_dir) != backup_dir {
+        bail!("operation backup_dir does not match its containing directory");
+    }
+    let slot = device.current_slot;
+    let partition = partition_name(slot)?;
+    if operation.next_boot_slot != slot.to_string()
+        || operation.target_partition != partition
+        || operation.input_size != device.partition_size
+        || operation.output_size != device.partition_size
+        || operation.already_prc
+        || operation.changed_byte_count != 9
+        || operation.changed_offsets.len() != 9
+        || operation.supported_fdt_count != 3
+    {
+        bail!("backup metadata does not describe the current slot's ROW-to-PRC transformation");
+    }
+    if let Some(expected) = expected_patched_hash
+        && operation.output_sha256 != expected
+    {
+        bail!("backup PRC hash does not match the current vendor_boot");
+    }
+
+    let stock = backup_dir.join(stock_name(slot));
+    let patched = backup_dir.join(patched_name(slot));
+    validate_backup_file(&stock, slot, &stock_name(slot))?;
+    validate_backup_file(&patched, slot, &patched_name(slot))?;
+    if sha256_file(&stock)? != operation.input_sha256 {
+        bail!("stock backup SHA-256 does not match operation metadata");
+    }
+    if sha256_file(&patched)? != operation.output_sha256 {
+        bail!("PRC backup SHA-256 does not match operation metadata");
+    }
+    let stock_fdt = inspect_image(&stock)?;
+    let patched_fdt = inspect_image(&patched)?;
+    if stock_fdt.region != Region::Row
+        || patched_fdt.region != Region::Prc
+        || stock_fdt.supported_fdt_count != 3
+        || patched_fdt.supported_fdt_count != 3
+    {
+        bail!("backup artifact FDT validation failed");
+    }
+    Ok(())
+}
+
+fn validate_current_restore_device(device: &DeviceInfo) -> Result<()> {
+    if !device.supported_device {
+        bail!(
+            "unsupported device: product={}, model={}, hwboardid={}, unlocked={}",
+            device.product,
+            device.system_model,
+            device.hwboardid,
+            device.bootloader_unlocked
+        );
+    }
+    if device.current_slot != device.next_boot_slot {
+        bail!("OTA-pending state detected; current stock restore must be completed before starting the OTA");
+    }
+    let partition = partition_name(device.current_slot)?;
+    if device.target_partition != partition {
+        bail!("current slot partition mapping is inconsistent");
+    }
+    let expected_path = partition_path(device.current_slot)?;
+    if Path::new(&device.target_path) != expected_path {
+        bail!("current slot partition path is inconsistent");
+    }
+    validate_block_device(&expected_path, partition)?;
+    Ok(())
+}
+
+fn write_current_and_verify(device: &DeviceInfo, image: &Path, expected_hash: &str) -> Result<()> {
+    validate_current_restore_device(device)?;
+    let image_size = fs::metadata(image)?.len();
+    validate_partition_size(device.partition_size, image_size)?;
+    let partition = partition_name(device.current_slot)?;
+    validate_block_device(Path::new(&device.target_path), partition)?;
+    let mut source = File::open(image)?;
+    let mut target = OpenOptions::new().write(true).open(&device.target_path)?;
+    let copied_hash = stream_copy_exact(&mut source, &mut target, image_size)?;
+    target.sync_all()?;
+    if copied_hash != expected_hash {
+        bail!("stock backup changed while writing");
+    }
+    let readback = hash_partition(device)?;
+    if readback != expected_hash {
+        bail!("full partition SHA-256 mismatch: {readback} != {expected_hash}");
+    }
+    Ok(())
+}
+
 fn verify(slot: char, image: PathBuf) -> Result<()> {
     let _lock = operation_lock()?;
     validate_backup_file(&image, slot, "")?;
@@ -267,7 +500,7 @@ fn prepare_artifacts(device: &DeviceInfo, backup_dir: &Path) -> Result<(Operatio
             bail!("existing dry-run artifacts do not match the current device state");
         }
         let report = inspect_image(&patched)?;
-        if report.region != tb376_ota_helper_native::Region::Prc
+        if report.region != Region::Prc
             || report.supported_fdt_count != 3
             || report.tuna_count != 2
             || report.tunap_count != 1
@@ -472,7 +705,10 @@ fn write_operation_files(device: &DeviceInfo, operation: &Operation) -> Result<(
 
 fn write_hash_file(image: &Path, hash: &str) -> Result<()> {
     let file_name = image.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-    fs::write(image.with_file_name(format!("{file_name}.sha256")), format!("{hash}  {file_name}\n"))?;
+    fs::write(
+        image.with_file_name(format!("{file_name}.sha256")),
+        format!("{hash}  {file_name}\n"),
+    )?;
     Ok(())
 }
 
@@ -504,11 +740,11 @@ fn battery_state() -> Result<(u8, bool)> {
     let status = fs::read_to_string("/sys/class/power_supply/battery/status")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let online = ["usb", "ac", "wireless"]
-        .iter()
-        .any(|name| fs::read_to_string(format!("/sys/class/power_supply/{name}/online"))
+    let online = ["usb", "ac", "wireless"].iter().any(|name| {
+        fs::read_to_string(format!("/sys/class/power_supply/{name}/online"))
             .map(|v| v.trim() == "1")
-            .unwrap_or(false));
+            .unwrap_or(false)
+    });
     Ok((
         capacity,
         online || status.contains("charging") || status.contains("full"),
@@ -549,8 +785,9 @@ fn prop(props: &[(String, String)], key: &str) -> Option<String> {
 
 fn current_slot(props: &[(String, String)]) -> Result<char> {
     let prop_slot = prop(props, "ro.boot.slot_suffix").and_then(|v| normalize_slot(&v));
-    let bootctl_slot =
-        command_output("/system/bin/bootctl", &["get-current-slot"]).ok().and_then(|v| normalize_slot(&v));
+    let bootctl_slot = command_output("/system/bin/bootctl", &["get-current-slot"])
+        .ok()
+        .and_then(|v| normalize_slot(&v));
     match (prop_slot, bootctl_slot) {
         (Some(a), Some(b)) if a != b => bail!("slot sources disagree: {a}/{b}"),
         (Some(slot), _) | (_, Some(slot)) => Ok(slot),
@@ -590,8 +827,7 @@ fn detect_hwboardid(props: &[(String, String)]) -> Result<String> {
         }
     }
     if let Some((_, value)) = props.iter().find(|(key, value)| {
-        key.to_ascii_lowercase().contains("board")
-            && value.contains(EXPECTED_HWBOARD_ID)
+        key.to_ascii_lowercase().contains("board") && value.contains(EXPECTED_HWBOARD_ID)
     }) {
         return Ok(value.clone());
     }
@@ -635,7 +871,10 @@ fn validate_backup_dir(path: &Path, must_exist: bool) -> Result<()> {
 fn validate_backup_file(path: &Path, slot: char, expected_name: &str) -> Result<()> {
     let parent = path.parent().context("backup has no parent")?;
     validate_backup_dir(parent, true)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     if (!expected_name.is_empty() && name != expected_name)
         || (expected_name.is_empty() && name != stock_name(slot) && name != patched_name(slot))
     {

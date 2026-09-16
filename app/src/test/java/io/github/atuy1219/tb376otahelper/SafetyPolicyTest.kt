@@ -14,21 +14,31 @@ class SafetyPolicyTest {
     @Test
     fun noRootDisablesWrite() {
         assertFalse(canPatch(state(root = false)))
+        assertFalse(canRestoreCurrentStock(state(root = false, current = "a", next = "a")))
     }
 
     @Test
     fun lockedBootloaderDisablesWrite() {
         assertFalse(canPatch(state(unlocked = false)))
+        assertFalse(canRestoreCurrentStock(state(unlocked = false, current = "a", next = "a")))
     }
 
     @Test
-    fun sameNextBootSlotDisablesWrite() {
+    fun sameNextBootSlotDisablesPatch() {
         assertFalse(canPatch(state(current = "a", next = "a")))
+    }
+
+    @Test
+    fun currentStockRestoreRequiresNoPendingOtaAndPrcRegion() {
+        assertTrue(canRestoreCurrentStock(state(current = "a", next = "a", region = "PRC")))
+        assertFalse(canRestoreCurrentStock(state(current = "a", next = "b", region = "PRC")))
+        assertFalse(canRestoreCurrentStock(state(current = "a", next = "a", region = "ROW")))
     }
 
     @Test
     fun operationInProgressDisablesReentry() {
         assertFalse(canPatch(state(busy = true)))
+        assertFalse(canRestoreCurrentStock(state(busy = true, current = "a", next = "a")))
     }
 
     @Test
@@ -46,7 +56,9 @@ class SafetyPolicyTest {
     fun unfinishedJournalRequiresRecoveryScreen() {
         assertTrue(isRecoveryRequired(objectOf("""{"status":"writing"}""")))
         assertTrue(isRecoveryRequired(objectOf("""{"status":"restore_failed_do_not_reboot"}""")))
+        assertTrue(isRecoveryRequired(objectOf("""{"status":"current_stock_restore_writing"}""")))
         assertFalse(isRecoveryRequired(objectOf("""{"status":"success"}""")))
+        assertFalse(isRecoveryRequired(objectOf("""{"status":"current_stock_restore_success"}""")))
     }
 
     @Test
@@ -84,6 +96,7 @@ class SafetyPolicyTest {
         current: String = "a",
         next: String = "b",
         busy: Boolean = false,
+        region: String = "PRC",
         operationStatus: String = "dry_run_success",
         writeComplete: Boolean = false,
         verified: Boolean = false,
@@ -98,6 +111,7 @@ class SafetyPolicyTest {
                 "next_boot_slot":"$next"
             }""",
         ),
+        fdt = objectOf("""{"region":"$region"}"""),
         operation = objectOf(
             """{
                 "status":"$operationStatus",

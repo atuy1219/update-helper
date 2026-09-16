@@ -58,6 +58,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
         return
     }
 
+    var currentStockConfirm by remember { mutableStateOf(false) }
     var patchConfirm by remember { mutableStateOf(false) }
     var rebootConfirm by remember { mutableStateOf(false) }
     val exportLauncher = rememberLauncherForActivityResult(
@@ -73,7 +74,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
     ) {
         Text("TB376 OTA Helper", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "OTA適用後、「再起動してください」で止めた状態の更新先vendor_bootだけをPRC化します。vbmeta・boot・init_boot・superには触れません。",
+            "OTA開始前は必要に応じて現在OSのstock vendor_bootを復元できます。OTA適用後は「再起動してください」で止め、更新先vendor_bootだけをPRC化します。vbmeta・boot・init_boot・superには触れません。",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -102,6 +103,22 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("端末を検査") }
+
+        OutlinedButton(
+            onClick = { currentStockConfirm = true },
+            enabled = canRestoreCurrentStock(state),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                if (state.fdt?.string("region") == "ROW" &&
+                    state.device?.string("current_slot") == state.device?.string("next_boot_slot")
+                ) {
+                    "現在OSのvendor_bootはstock ROW"
+                } else {
+                    "現在OSのstock vendor_bootを復元"
+                },
+            )
+        }
 
         Button(
             onClick = vm::dryRun,
@@ -150,6 +167,24 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
         )
     }
 
+    if (currentStockConfirm) {
+        AlertDialog(
+            onDismissRequest = { currentStockConfirm = false },
+            title = { Text("現在OSのvendor_bootをstockへ戻します") },
+            text = {
+                Text("OTA開始前専用です。現在slotのvendor_bootが、過去にこのHelperが生成したPRCイメージとSHA-256完全一致する場合だけ、対応するstockバックアップを現在slotへ書き戻し、全体を再検証します。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    currentStockConfirm = false
+                    vm.restoreCurrentStock()
+                }) { Text("復元を実行") }
+            },
+            dismissButton = {
+                TextButton(onClick = { currentStockConfirm = false }) { Text("キャンセル") }
+            },
+        )
+    }
     if (patchConfirm) {
         AlertDialog(
             onDismissRequest = { patchConfirm = false },
@@ -229,6 +264,9 @@ private fun Status(label: String, value: String) {
 
 @Composable
 private fun RecoveryScreen(state: UiState, restore: () -> Unit) {
+    val currentStockRestore = state.recoveryJournal
+        ?.string("status")
+        ?.startsWith("current_stock_restore_") == true
     Column(
         Modifier
             .fillMaxSize()
@@ -248,7 +286,15 @@ private fun RecoveryScreen(state: UiState, restore: () -> Unit) {
         }
         Spacer(Modifier.height(24.dp))
         Button(onClick = restore, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-            Text(if (state.busy) "復元中…" else "stockバックアップを復元して全体検証")
+            Text(
+                if (state.busy) {
+                    "復元中…"
+                } else if (currentStockRestore) {
+                    "現在slotのstock vendor_boot復元を再試行"
+                } else {
+                    "stockバックアップを復元して全体検証"
+                },
+            )
         }
         Spacer(Modifier.height(12.dp))
         Text("復元に失敗した場合はFastbootまたはEDLで復旧が必要です。")
