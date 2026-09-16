@@ -6,18 +6,29 @@ profile: an officially unlocked Lenovo TB376FC (`product=malbec`,
 Next LKM. KernelSU Next's **SU compatibility** setting must be enabled so the
 app can request its explicitly approved root process.
 
-Before starting a normal ZUI A/B OTA, the app can restore the currently running
-slot's stock `vendor_boot` only when that slot exactly matches a PRC image that
-this Helper previously generated and the paired stock backup still exists.
-Once an OTA is pending, that active-slot restore is refused.
+Before starting a differential/incremental ZUI A/B OTA, use **Prepare incremental
+OTA (restore stock)**. The app first asks KernelSU Next to restore the currently
+running slot's patched `init_boot` (or `boot` when that is the selected KernelSU
+partition). It accepts the result only when KernelSU identifies a real
+`/data/adb/ksu/ksun_backup_<sha1>` stock backup and the generated candidate is
+byte-identical to that backup by SHA-256. KernelSU's rebuild-without-KSU fallback
+is deliberately rejected because it is not guaranteed to match the stock source
+bytes required by a differential OTA.
+
+The same preparation then restores the currently running slot's stock
+`vendor_boot` only when that slot exactly matches a PRC image that this Helper
+previously generated and the paired stock backup still exists. Both restored
+partitions are read back and SHA-256 verified. Once an OTA is pending, these
+active-slot restore paths are refused.
 
 After the OTA has finished installing and the system is waiting for a reboot,
 the normal flow backs up and patches only the next boot slot's
-`vendor_boot_<slot>`. It never writes `vbmeta`, `boot`, `init_boot`, or `super`.
-The active `vendor_boot` is writable only by the dedicated, hash-matched
-pre-OTA stock-restore path.
+`vendor_boot_<slot>`. It never writes `vbmeta` or `super`. The current-slot
+`init_boot`/`boot` is writable only by the dedicated pre-OTA KernelSU stock
+restore path, and the active `vendor_boot` is writable only by the dedicated,
+hash-matched pre-OTA stock-restore path.
 
-The patch is the fixed LTBox Tuna/Tunap transformation:
+The vendor_boot patch is the fixed LTBox Tuna/Tunap transformation:
 
 - exactly 3 supported FDTs;
 - exactly 2 root `compatible` lists containing `qcom,tuna`;
@@ -29,16 +40,25 @@ See [docs/TB376_OTA_HELPER.md](docs/TB376_OTA_HELPER.md) for design and build
 details, [docs/TB376_OTA_WORKFLOW.md](docs/TB376_OTA_WORKFLOW.md) before every
 OTA, and [docs/TB376_RECOVERY.md](docs/TB376_RECOVERY.md) before recovery.
 
-## Correct OTA order
+## Correct differential OTA order
 
-1. Inspect the device. If the current `vendor_boot` is PRC from the previous
-   Helper cycle, use **Restore current OS stock vendor_boot** first.
-2. Install the ZUI OTA.
-3. Stop at “Restart required”; do not reboot.
-4. In KernelSU Next Manager, install to the inactive slot.
-5. Run Dry Run and patch the update target with TB376 OTA Helper.
-6. Confirm full-partition read-back SHA-256 success.
-7. Explicitly approve reboot in the app.
+1. Inspect the device while the current slot is still the next boot slot.
+2. Run **Prepare incremental OTA (restore stock)**. It must verify the KernelSU
+   stock backup and restore/verify current `init_boot` or `boot`, then restore
+   and verify current `vendor_boot` as ROW.
+3. Do **not** reboot. Start the ZUI OTA immediately after the helper reports the
+   incremental-OTA-ready state.
+4. When ZUI asks to restart, stop. Do **not** reboot.
+5. In KernelSU Next Manager, install to the inactive slot.
+6. Return to TB376 OTA Helper, inspect, run Dry Run, and patch only the update
+   target `vendor_boot`.
+7. Confirm full-partition read-back SHA-256 success and export the backup.
+8. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
+   approve reboot in the app.
+
+If KernelSU's exact stock backup is missing, or the current PRC `vendor_boot`
+does not match a Helper-generated backup pair, preparation fails closed rather
+than guessing or writing a reconstructed image.
 
 Google Play system updates normally do not replace `vendor_boot` and do not
 require this flow.
