@@ -10,42 +10,84 @@ has an officially unlocked bootloader plus KernelSU Next LKM.
 - Keep a separate full Fastboot/EDL recovery set.
 - Charge to at least 50%, or keep external power connected above 30%.
 - Do not relock the bootloader.
+- KernelSU Next's original stock backup in `/data/adb/ksu/` must still exist.
+  Differential OTA preparation deliberately refuses KernelSU's reconstructed
+  fallback image because byte-for-byte stock equality cannot be proven from it.
 
-## Every full ZUI OTA
+## Differential/incremental ZUI OTA
 
-1. Install the ZUI OTA normally.
-2. When ZUI asks to restart, stop. Do **not** reboot.
-3. Open KernelSU Next Manager.
-4. Select **Install to inactive slot** and wait for success.
-5. Return to TB376 OTA Helper and select **Inspect device**.
-6. Confirm current slot and next boot slot differ.
-7. Confirm the target is only `vendor_boot_<next slot>`.
-8. Run **Dry Run**. Review the three changed FDT offsets and both hashes.
-9. Approve **Back up and patch update-target vendor_boot**.
-10. Wait for full-partition read-back SHA-256 verification.
-11. Export the backup to a user-selected SAF folder.
-12. Only after both KernelSU and vendor_boot steps succeeded, explicitly approve
-    **Safe reboot**.
+1. Before downloading/applying the OTA, open TB376 OTA Helper and select
+   **Inspect device**.
+2. Confirm current slot equals next boot slot. If they differ, an OTA is already
+   pending and current-slot stock preparation is refused.
+3. Select **Prepare incremental OTA (restore stock)**.
+4. The helper asks KernelSU Next to process the current `init_boot_<slot>` first
+   (falling back to current `boot_<slot>` only when appropriate). The operation
+   is accepted only when KernelSU reports that it used the exact
+   `/data/adb/ksu/ksun_backup_<sha1>` backup embedded in the patched image.
+5. The helper verifies the backup SHA-1 identity, verifies candidate and backup
+   SHA-256 equality, writes the exact stock image, and verifies the whole target
+   partition by SHA-256 read-back.
+6. The helper then restores current `vendor_boot_<slot>` only from the exact
+   Helper-generated ROW/PRC backup pair matching the currently installed PRC
+   partition, followed by full-partition SHA-256 read-back verification.
+7. Confirm the UI reports **Incremental OTA preparation complete** and
+   `vendor_boot` region is `ROW`.
+8. Do **not** reboot. Start/apply the ZUI differential OTA immediately.
+9. When ZUI asks to restart, stop. Do **not** reboot.
+10. Open KernelSU Next Manager and select **Install to inactive slot**. Wait for
+    success.
+11. Return to TB376 OTA Helper and select **Inspect device**.
+12. Confirm current slot and next boot slot differ, and the target is only
+    `vendor_boot_<next slot>`.
+13. Run **Dry Run**. Review the three changed FDT offsets and both hashes.
+14. Approve **Back up and patch update-target vendor_boot**.
+15. Wait for full-partition read-back SHA-256 verification.
+16. Export the backup to a user-selected SAF folder.
+17. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
+    approve **Safe reboot**.
 
-The app does not patch or verify `init_boot`. If KernelSU's inactive-slot state
-cannot be determined reliably, the UI reports “cannot confirm”; it never writes
-`init_boot`.
+## Why KernelSU's rebuilt fallback is rejected
 
-## Already PRC
+KernelSU Next can remove its ramdisk files and repack a patched image even when
+the original stock backup is missing. That is useful for ordinary recovery, but
+a differential OTA may validate or consume source partition bytes. Repacking
+can produce an image that is logically equivalent without being byte-identical
+to Lenovo's original source. TB376 OTA Helper therefore proceeds only when the
+real KernelSU stock backup exists and the candidate is SHA-256 identical to it.
 
-If the next-slot image already has all three root `region,country=PRC` values,
-the helper does not rewrite it. It still validates the complete FDT set and
-records the full partition SHA-256 as `success_already_prc`.
+The helper stores its verified KernelSU candidate and metadata under
+`/data/adb/tb376-ota-helper/ksu-ota-prep/` so an interrupted write can be retried
+without selecting a different source image.
+
+## Already stock / missing backup
+
+If a previously verified Helper candidate for the same slot and build
+fingerprint already matches the current `init_boot`/`boot` SHA-256, the KernelSU
+part of preparation is accepted as already stock. Otherwise, if KernelSU's exact
+stock backup cannot be proven, preparation fails closed.
+
+If current `vendor_boot` is already a supported ROW image, no vendor_boot write
+is necessary. If it is PRC, its complete SHA-256 must match a previous
+Helper-generated PRC artifact with the corresponding ROW stock backup.
+
+## Already PRC after OTA
+
+If the next-slot `vendor_boot` image already has all three root
+`region,country=PRC` values, the post-OTA helper does not rewrite it. It still
+validates the complete FDT set and records the full partition SHA-256 as
+`success_already_prc`.
 
 ## What must never happen
 
 - Do not change or flash modified vbmeta. Hardware testing showed flags=3,
   damaged-signature, and unsigned algorithm-NONE vbmeta all mark the slot
   unbootable.
-- Do not patch the currently running slot.
-- Do not select a block device manually.
-- Do not reboot while the journal is incomplete or after a restore failure.
+- Do not reboot between successful pre-OTA stock preparation and starting the
+  ZUI OTA.
+- Do not manually select another block device or stock image.
+- Do not reboot while a write/restore operation is incomplete or after a
+  read-back verification failure.
 
 Google Play system updates normally do not update `vendor_boot`, so this helper
 is not normally required for them.
-

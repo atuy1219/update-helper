@@ -14,12 +14,14 @@ class SafetyPolicyTest {
     @Test
     fun noRootDisablesWrite() {
         assertFalse(canPatch(state(root = false)))
+        assertFalse(canPrepareIncrementalOta(state(root = false, current = "a", next = "a")))
         assertFalse(canRestoreCurrentStock(state(root = false, current = "a", next = "a")))
     }
 
     @Test
     fun lockedBootloaderDisablesWrite() {
         assertFalse(canPatch(state(unlocked = false)))
+        assertFalse(canPrepareIncrementalOta(state(unlocked = false, current = "a", next = "a")))
         assertFalse(canRestoreCurrentStock(state(unlocked = false, current = "a", next = "a")))
     }
 
@@ -29,15 +31,39 @@ class SafetyPolicyTest {
     }
 
     @Test
-    fun currentStockRestoreRequiresNoPendingOtaAndPrcRegion() {
+    fun incrementalOtaPrepRequiresCurrentSlotKernelSuAndIdleUpdateEngine() {
+        assertTrue(canPrepareIncrementalOta(state(current = "a", next = "a", region = "PRC")))
+        assertTrue(canPrepareIncrementalOta(state(current = "a", next = "a", region = "ROW")))
+        assertFalse(canPrepareIncrementalOta(state(current = "a", next = "b", region = "PRC")))
+        assertFalse(canPrepareIncrementalOta(state(current = "a", next = "a", region = "PRC", kernelsu = false)))
+        assertFalse(
+            canPrepareIncrementalOta(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_DOWNLOADING"),
+            ),
+        )
+        assertFalse(
+            canPrepareIncrementalOta(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_FINALIZING"),
+            ),
+        )
+    }
+
+    @Test
+    fun currentStockRestoreRequiresNoPendingOtaIdleEngineAndPrcRegion() {
         assertTrue(canRestoreCurrentStock(state(current = "a", next = "a", region = "PRC")))
         assertFalse(canRestoreCurrentStock(state(current = "a", next = "b", region = "PRC")))
         assertFalse(canRestoreCurrentStock(state(current = "a", next = "a", region = "ROW")))
+        assertFalse(
+            canRestoreCurrentStock(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_DOWNLOADING"),
+            ),
+        )
     }
 
     @Test
     fun operationInProgressDisablesReentry() {
         assertFalse(canPatch(state(busy = true)))
+        assertFalse(canPrepareIncrementalOta(state(busy = true, current = "a", next = "a")))
         assertFalse(canRestoreCurrentStock(state(busy = true, current = "a", next = "a")))
     }
 
@@ -97,6 +123,8 @@ class SafetyPolicyTest {
         next: String = "b",
         busy: Boolean = false,
         region: String = "PRC",
+        kernelsu: Boolean = true,
+        otaStatus: String = "CURRENT_OP=UPDATE_STATUS_IDLE",
         operationStatus: String = "dry_run_success",
         writeComplete: Boolean = false,
         verified: Boolean = false,
@@ -107,8 +135,10 @@ class SafetyPolicyTest {
             """{
                 "bootloader_unlocked":$unlocked,
                 "supported_device":true,
+                "kernelsu_next_present":$kernelsu,
                 "current_slot":"$current",
-                "next_boot_slot":"$next"
+                "next_boot_slot":"$next",
+                "ota_status":"$otaStatus"
             }""",
         ),
         fdt = objectOf("""{"region":"$region"}"""),

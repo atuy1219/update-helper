@@ -25,6 +25,9 @@ data class UiState(
     val error: String? = null,
     val kernelsuPackages: List<String> = emptyList(),
     val exportTree: Uri? = null,
+    val otaReady: Boolean = false,
+    val ksuStockPartition: String? = null,
+    val ksuStockSha256: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -53,7 +56,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             device = root.obj("device"),
             fdt = root.obj("fdt"),
             operation = root.obj("journal"),
+            otaReady = false,
+            ksuStockPartition = null,
+            ksuStockSha256 = null,
             status = "端末検査が完了しました",
+            error = null,
+        )
+    }
+
+    fun prepareIncrementalOta() = launchOperation("差分OTA準備: KernelSU stockを検証中") {
+        val device = _state.value.device ?: error("先に端末を検査してください")
+        val slot = device.string("current_slot") ?: error("current slot不明")
+        val next = device.string("next_boot_slot") ?: error("next boot slot不明")
+        check(slot == next) { "OTA再起動待ち状態では差分OTA準備を実行できません" }
+        check(isUpdateEngineIdle(device)) {
+            "update_engineがIDLEではありません。OTAのダウンロード/適用中は現在slotを変更できません"
+        }
+        val fingerprint = device.string("build_fingerprint") ?: error("build fingerprint不明")
+        check(device.bool("supported_device") == true && device.bool("bootloader_unlocked") == true) {
+            "対応端末・Unlocked条件を満たしていません"
+        }
+        val battery = device.string("battery_percent")?.toIntOrNull() ?: error("battery不明")
+        val charging = device.bool("charging") == true
+        check(battery >= 30) { "battery below 30%; writing is prohibited" }
+        check(battery >= 50 || charging) { "battery below 50% and not charging" }
+
+        native.install().getOrThrow()
+        val ksu = native.restoreKernelSuCurrentStock(slot, fingerprint).getOrThrow()
+        _state.value = _state.value.copy(
+            status = "差分OTA準備: ${ksu.partition}はstock検証済み。vendor_bootを復元中",
+            ksuStockPartition = ksu.partition,
+            ksuStockSha256 = ksu.stockSha256,
+            otaReady = false,
+        )
+
+        val vendor = native.restoreCurrentStock()
+        check(vendor.isSuccess) { vendor.error ?: "current vendor_boot stock restore failed" }
+
+        val verification = native.inspect()
+        check(verification.isSuccess) { verification.error ?: "post-restore inspect failed" }
+        val data = verification.result!!
+        val verifiedDevice = data.obj("device") ?: error("device verification missing")
+        val verifiedFdt = data.obj("fdt") ?: error("vendor_boot FDT verification missing")
+        check(verifiedDevice.string("current_slot") == verifiedDevice.string("next_boot_slot")) {
+            "処理中にnext boot slotが変更されました"
+        }
+        check(isUpdateEngineIdle(verifiedDevice)) {
+            "処理中にupdate_engineがIDLE以外へ遷移しました。OTAを開始せず状態を確認してください"
+        }
+        check(verifiedFdt.string("region") == "ROW") {
+            "vendor_bootがstock ROWとして確認できません"
+        }
+
+        _state.value = _state.value.copy(
+            rootAvailable = true,
+            device = verifiedDevice,
+            fdt = verifiedFdt,
+            operation = data.obj("journal") ?: vendor.result?.obj("operation") ?: _state.value.operation,
+            recoveryJournal = null,
+            otaReady = true,
+            ksuStockPartition = ksu.partition,
+            ksuStockSha256 = ksu.stockSha256,
+            status = "差分OTA準備完了。${ksu.partition}とvendor_bootをstockとして全体検証しました。再起動せずOTAを開始してください",
             error = null,
         )
     }
@@ -82,6 +146,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             device = data.obj("device"),
             operation = data.obj("operation"),
             recoveryJournal = null,
+            otaReady = false,
             status = if (data.obj("operation")?.bool("already_prc") == true) {
                 "既にPRC化済みです。全体SHA-256を検証しました"
             } else {
@@ -110,6 +175,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(
             operation = data.obj("operation"),
             recoveryJournal = null,
+            otaReady = false,
             status = "stockを復元し、全体SHA-256を検証しました",
             error = null,
         )
@@ -140,6 +206,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun performCurrentStockRestore() {
+        val device = _state.value.device ?: error("先に端末を検査してください")
+        check(isUpdateEngineIdle(device)) {
+            "update_engineがIDLEではありません。OTA適用中は現在slotのvendor_bootを変更できません"
+        }
         val result = native.restoreCurrentStock()
         check(result.isSuccess) { result.error ?: "current stock restore failed" }
         val data = result.result!!
@@ -149,6 +219,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             fdt = data.obj("fdt") ?: _state.value.fdt,
             operation = data.obj("operation") ?: _state.value.operation,
             recoveryJournal = null,
+            otaReady = false,
             status = if (alreadyStock) {
                 "現在OSのvendor_bootは既にstock ROWです。書き込みは行っていません"
             } else {
@@ -165,6 +236,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { block() }.onFailure { error ->
                 _state.value = _state.value.copy(
                     rootAvailable = if (error.message?.contains("root", true) == true) false else _state.value.rootAvailable,
+                    otaReady = false,
                     error = error.message ?: error.toString(),
                     status = "処理に失敗しました。再起動しないでください",
                 )
@@ -203,6 +275,11 @@ fun isRecoveryRequired(journal: JsonObject): Boolean =
 fun JsonObject.bool(name: String): Boolean? =
     this[name]?.jsonPrimitive?.booleanOrNull
 
+fun isUpdateEngineIdle(device: JsonObject): Boolean =
+    device.string("ota_status")
+        ?.uppercase()
+        ?.contains("UPDATE_STATUS_IDLE") == true
+
 fun canPatch(state: UiState): Boolean {
     val device = state.device ?: return false
     return !state.busy &&
@@ -214,12 +291,26 @@ fun canPatch(state: UiState): Boolean {
         state.operation?.string("status") == "dry_run_success"
 }
 
+fun canPrepareIncrementalOta(state: UiState): Boolean {
+    val device = state.device ?: return false
+    return !state.busy &&
+        state.rootAvailable == true &&
+        device.bool("bootloader_unlocked") == true &&
+        device.bool("supported_device") == true &&
+        device.bool("kernelsu_next_present") == true &&
+        isUpdateEngineIdle(device) &&
+        device.string("current_slot") in setOf("a", "b") &&
+        device.string("current_slot") == device.string("next_boot_slot") &&
+        state.fdt?.string("region") in setOf("ROW", "PRC")
+}
+
 fun canRestoreCurrentStock(state: UiState): Boolean {
     val device = state.device ?: return false
     return !state.busy &&
         state.rootAvailable == true &&
         device.bool("bootloader_unlocked") == true &&
         device.bool("supported_device") == true &&
+        isUpdateEngineIdle(device) &&
         device.string("current_slot") in setOf("a", "b") &&
         device.string("current_slot") == device.string("next_boot_slot") &&
         state.fdt?.string("region") == "PRC"
