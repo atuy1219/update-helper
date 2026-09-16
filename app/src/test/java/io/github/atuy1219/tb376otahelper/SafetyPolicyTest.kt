@@ -31,18 +31,33 @@ class SafetyPolicyTest {
     }
 
     @Test
-    fun incrementalOtaPrepRequiresCurrentSlotAndKernelSu() {
+    fun incrementalOtaPrepRequiresCurrentSlotKernelSuAndIdleUpdateEngine() {
         assertTrue(canPrepareIncrementalOta(state(current = "a", next = "a", region = "PRC")))
         assertTrue(canPrepareIncrementalOta(state(current = "a", next = "a", region = "ROW")))
         assertFalse(canPrepareIncrementalOta(state(current = "a", next = "b", region = "PRC")))
         assertFalse(canPrepareIncrementalOta(state(current = "a", next = "a", region = "PRC", kernelsu = false)))
+        assertFalse(
+            canPrepareIncrementalOta(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_DOWNLOADING"),
+            ),
+        )
+        assertFalse(
+            canPrepareIncrementalOta(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_FINALIZING"),
+            ),
+        )
     }
 
     @Test
-    fun currentStockRestoreRequiresNoPendingOtaAndPrcRegion() {
+    fun currentStockRestoreRequiresNoPendingOtaIdleEngineAndPrcRegion() {
         assertTrue(canRestoreCurrentStock(state(current = "a", next = "a", region = "PRC")))
         assertFalse(canRestoreCurrentStock(state(current = "a", next = "b", region = "PRC")))
         assertFalse(canRestoreCurrentStock(state(current = "a", next = "a", region = "ROW")))
+        assertFalse(
+            canRestoreCurrentStock(
+                state(current = "a", next = "a", region = "PRC", otaStatus = "CURRENT_OP=UPDATE_STATUS_DOWNLOADING"),
+            ),
+        )
     }
 
     @Test
@@ -109,6 +124,7 @@ class SafetyPolicyTest {
         busy: Boolean = false,
         region: String = "PRC",
         kernelsu: Boolean = true,
+        otaStatus: String = "CURRENT_OP=UPDATE_STATUS_IDLE",
         operationStatus: String = "dry_run_success",
         writeComplete: Boolean = false,
         verified: Boolean = false,
@@ -121,7 +137,8 @@ class SafetyPolicyTest {
                 "supported_device":true,
                 "kernelsu_next_present":$kernelsu,
                 "current_slot":"$current",
-                "next_boot_slot":"$next"
+                "next_boot_slot":"$next",
+                "ota_status":"$otaStatus"
             }""",
         ),
         fdt = objectOf("""{"region":"$region"}"""),
