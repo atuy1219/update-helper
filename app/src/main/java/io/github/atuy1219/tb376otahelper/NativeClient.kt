@@ -271,7 +271,7 @@ class NativeClient(private val context: Context) {
             if (status == null) {
                 "update_engineの現在状態を取得できないためactive slotへの書込みを拒否しました"
             } else {
-                "update_engineが$statusのためactive slotへの書込みを拒否しました"
+                "update_engineが${status}のためactive slotへの書込みを拒否しました"
             }
         }
     }
