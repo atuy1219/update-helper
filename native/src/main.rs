@@ -19,6 +19,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OTA_IDLE: &str = "UPDATE_STATUS_IDLE";
 const OTA_UPDATED_NEED_REBOOT: &str = "UPDATE_STATUS_UPDATED_NEED_REBOOT";
+const QUALCOMM_FIRMWARE_BASELINE: &str = "TB390FU_ROW";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeviceInfo {
@@ -40,6 +41,7 @@ struct DeviceInfo {
     charging: bool,
     ota_status: Option<String>,
     kernelsu_next_present: bool,
+    qualcomm_firmware_baseline: String,
     supported_device: bool,
 }
 
@@ -846,6 +848,7 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
         ota_status: Some(ota_status),
         kernelsu_next_present: Path::new("/sys/kernel/ksu").exists()
             || Path::new("/data/adb/ksu").exists(),
+        qualcomm_firmware_baseline: QUALCOMM_FIRMWARE_BASELINE.to_string(),
         supported_device,
     })
 }
