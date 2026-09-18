@@ -18,12 +18,16 @@ class NativeClient(private val context: Context) {
         const val BINARY = "$ROOT/bin/tb376-ota-helper-native"
         const val STATE = "$ROOT/state.json"
         private const val KSU_PREP_DIR = "$ROOT/ksu-ota-prep"
+        private const val OTA_IDLE = "UPDATE_STATUS_IDLE"
         private val KSU_DAEMON_CANDIDATES = listOf(
             "/data/adb/ksud",
             "/data/adb/ksu/bin/ksud",
         )
         private val KSU_BACKUP_LINE = Regex(
             "(?m)^- Using backup file (/data/adb/ksu/ksun_backup_([0-9a-fA-F]{40}))\\s*$",
+        )
+        private val OTA_STATUS_LINE = Regex(
+            "onStatusUpdate\\((UPDATE_STATUS_[A-Z0-9_]+)\\s",
         )
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
         private val HEX40 = Regex("^[0-9a-fA-F]{40}$")
@@ -235,6 +239,7 @@ class NativeClient(private val context: Context) {
     private fun flashAndVerify(candidate: String, partition: String, expectedSha256: String): String {
         val before = rootDigest("sha256sum", candidate, HEX64)
         require(before == expectedSha256) { "書込み直前にstock candidateが変更されました" }
+        requireUpdateEngineIdle()
         rootExec(
             "/system/bin/toybox",
             "dd",
@@ -250,6 +255,25 @@ class NativeClient(private val context: Context) {
             "${File(partition).name}全体のSHA-256読戻しがstockと一致しません。再起動しないでください"
         }
         return readback
+    }
+
+    private fun requireUpdateEngineIdle() {
+        val result = rootExec(
+            "/system/bin/toybox",
+            "timeout",
+            "2",
+            "/system/bin/update_engine_client",
+            "--follow",
+        )
+        val combined = result.stdout + "\n" + result.stderr
+        val status = OTA_STATUS_LINE.find(combined)?.groupValues?.get(1)
+        require(status == OTA_IDLE) {
+            if (status == null) {
+                "update_engineの現在状態を取得できないためactive slotへの書込みを拒否しました"
+            } else {
+                "update_engineが${status}のためactive slotへの書込みを拒否しました"
+            }
+        }
     }
 
     private fun readKsuPrepMeta(path: String): JsonObject? {
@@ -296,12 +320,17 @@ class NativeClient(private val context: Context) {
             runCatching { json.parseToJsonElement(line).jsonObject }.getOrNull()
         }
         val error = events.lastOrNull { it["type"]?.jsonPrimitive?.content == "error" }
-            ?.get("data")?.jsonObject?.get("message")?.jsonPrimitive?.content
+            ?.get("data")
+            ?.let { it as? JsonObject }
+            ?.get("message")
+            ?.jsonPrimitive
+            ?.content
         NativeResult(
             exitCode = exit,
             events = events,
             result = events.lastOrNull { it["type"]?.jsonPrimitive?.content == "result" }
-                ?.get("data")?.jsonObject,
+                ?.get("data")
+                ?.let { it as? JsonObject },
             error = error ?: stderr.ifBlank { null },
         )
     }
@@ -376,7 +405,10 @@ data class KernelSuStockResult(
 private data class ProcessResult(val exitCode: Int, val stdout: String, val stderr: String)
 
 fun JsonObject.string(path: String): String? =
-    this[path]?.jsonPrimitive?.content
+    this[path]
+        ?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+        ?.jsonPrimitive
+        ?.content
 
 fun JsonObject.obj(path: String): JsonObject? =
-    this[path]?.let { it.jsonObject }
+    this[path] as? JsonObject
