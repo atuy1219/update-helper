@@ -240,21 +240,61 @@ class NativeClient(private val context: Context) {
         val before = rootDigest("sha256sum", candidate, HEX64)
         require(before == expectedSha256) { "書込み直前にstock candidateが変更されました" }
         requireUpdateEngineIdle()
-        rootExec(
-            "/system/bin/toybox",
-            "dd",
-            "if=$candidate",
-            "of=$partition",
-            "bs=1048576",
-        ).requireSuccess()
-        rootExec("/system/bin/sync").requireSuccess()
-        val candidateAfter = rootDigest("sha256sum", candidate, HEX64)
-        require(candidateAfter == expectedSha256) { "書込み中にstock candidateが変更されました" }
-        val readback = rootDigest("sha256sum", partition, HEX64)
-        require(readback == expectedSha256) {
-            "${File(partition).name}全体のSHA-256読戻しがstockと一致しません。再起動しないでください"
+        return withWritableBlockDevice(partition) {
+            rootExec(
+                "/system/bin/toybox",
+                "dd",
+                "if=$candidate",
+                "of=$partition",
+                "bs=1048576",
+            ).requireSuccess()
+            rootExec("/system/bin/sync").requireSuccess()
+            val candidateAfter = rootDigest("sha256sum", candidate, HEX64)
+            require(candidateAfter == expectedSha256) { "書込み中にstock candidateが変更されました" }
+            val readback = rootDigest("sha256sum", partition, HEX64)
+            require(readback == expectedSha256) {
+                "${File(partition).name}全体のSHA-256読戻しがstockと一致しません。再起動しないでください"
+            }
+            readback
         }
-        return readback
+    }
+
+    private fun blockDeviceReadOnly(partition: String): Boolean {
+        val result = rootExec("/system/bin/toybox", "blockdev", "--getro", partition)
+        result.requireSuccess()
+        return when (val value = result.stdout.trim()) {
+            "0" -> false
+            "1" -> true
+            else -> error("blockdev --getroの出力が不正です (" + partition + "): " + value)
+        }
+    }
+
+    private fun setBlockDeviceReadOnly(partition: String, readOnly: Boolean) {
+        val flag = if (readOnly) "--setro" else "--setrw"
+        rootExec("/system/bin/toybox", "blockdev", flag, partition).requireSuccess()
+        val action = if (readOnly) "復元" else "解除"
+        check(blockDeviceReadOnly(partition) == readOnly) {
+            File(partition).name + "のread-only状態を" + action + "できません"
+        }
+    }
+
+    private fun <T> withWritableBlockDevice(partition: String, block: () -> T): T {
+        val wasReadOnly = blockDeviceReadOnly(partition)
+        if (wasReadOnly) setBlockDeviceReadOnly(partition, false)
+
+        val operation = runCatching(block)
+        val restore = if (wasReadOnly) {
+            runCatching { setBlockDeviceReadOnly(partition, true) }
+        } else {
+            Result.success(Unit)
+        }
+
+        operation.exceptionOrNull()?.let { operationError ->
+            restore.exceptionOrNull()?.let(operationError::addSuppressed)
+            throw operationError
+        }
+        restore.getOrThrow()
+        return operation.getOrThrow()
     }
 
     private fun requireUpdateEngineIdle() {
