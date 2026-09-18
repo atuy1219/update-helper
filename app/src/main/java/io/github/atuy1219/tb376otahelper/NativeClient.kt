@@ -320,12 +320,17 @@ class NativeClient(private val context: Context) {
             runCatching { json.parseToJsonElement(line).jsonObject }.getOrNull()
         }
         val error = events.lastOrNull { it["type"]?.jsonPrimitive?.content == "error" }
-            ?.get("data")?.jsonObject?.get("message")?.jsonPrimitive?.content
+            ?.get("data")
+            ?.let { it as? JsonObject }
+            ?.get("message")
+            ?.jsonPrimitive
+            ?.content
         NativeResult(
             exitCode = exit,
             events = events,
             result = events.lastOrNull { it["type"]?.jsonPrimitive?.content == "result" }
-                ?.get("data")?.jsonObject,
+                ?.get("data")
+                ?.let { it as? JsonObject },
             error = error ?: stderr.ifBlank { null },
         )
     }
@@ -400,7 +405,10 @@ data class KernelSuStockResult(
 private data class ProcessResult(val exitCode: Int, val stdout: String, val stderr: String)
 
 fun JsonObject.string(path: String): String? =
-    this[path]?.jsonPrimitive?.content
+    this[path]
+        ?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+        ?.jsonPrimitive
+        ?.content
 
 fun JsonObject.obj(path: String): JsonObject? =
-    this[path]?.let { it.jsonObject }
+    this[path] as? JsonObject
