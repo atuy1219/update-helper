@@ -720,9 +720,8 @@ fn with_writable_block_device<T>(
 
     match (operation_result, restore_result) {
         (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(restore_error)) => {
-            Err(restore_error.context("write succeeded but failed to restore block-device read-only state"))
-        }
+        (Ok(_), Err(restore_error)) => Err(restore_error
+            .context("write succeeded but failed to restore block-device read-only state")),
         (Err(operation_error), Ok(())) => Err(operation_error),
         (Err(operation_error), Err(restore_error)) => Err(operation_error.context(format!(
             "also failed to restore block-device read-only state: {restore_error:#}"
