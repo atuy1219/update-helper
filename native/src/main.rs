@@ -544,19 +544,22 @@ fn write_current_and_verify(device: &DeviceInfo, image: &Path, expected_hash: &s
     let image_size = fs::metadata(image)?.len();
     validate_partition_size(device.partition_size, image_size)?;
     let partition = partition_name(device.current_slot)?;
-    validate_block_device(Path::new(&device.target_path), partition)?;
-    let mut source = File::open(image)?;
-    let mut target = OpenOptions::new().write(true).open(&device.target_path)?;
-    let copied_hash = stream_copy_exact(&mut source, &mut target, image_size)?;
-    target.sync_all()?;
-    if copied_hash != expected_hash {
-        bail!("stock backup changed while writing");
-    }
-    let readback = hash_partition(device)?;
-    if readback != expected_hash {
-        bail!("full partition SHA-256 mismatch: {readback} != {expected_hash}");
-    }
-    Ok(())
+    let target_path = Path::new(&device.target_path);
+    validate_block_device(target_path, partition)?;
+    with_writable_block_device(target_path, || {
+        let mut source = File::open(image)?;
+        let mut target = OpenOptions::new().write(true).open(target_path)?;
+        let copied_hash = stream_copy_exact(&mut source, &mut target, image_size)?;
+        target.sync_all()?;
+        if copied_hash != expected_hash {
+            bail!("stock backup changed while writing");
+        }
+        let readback = hash_partition(device)?;
+        if readback != expected_hash {
+            bail!("full partition SHA-256 mismatch: {readback} != {expected_hash}");
+        }
+        Ok(())
+    })
 }
 
 fn verify(slot: char, image: PathBuf) -> Result<()> {
@@ -629,24 +632,102 @@ fn write_and_verify(device: &DeviceInfo, image: &Path, expected_hash: &str) -> R
     validate_partition_size(device.partition_size, image_size)?;
     let partition_name = partition_name(device.next_boot_slot)?;
     ensure_write_target(device.current_slot, device.next_boot_slot, partition_name)?;
-    validate_block_device(Path::new(&device.target_path), partition_name)?;
-    let mut source = File::open(image)?;
-    let mut target = OpenOptions::new().write(true).open(&device.target_path)?;
-    let copied_hash = stream_copy_exact(&mut source, &mut target, image_size)?;
-    target.sync_all()?;
-    if copied_hash != expected_hash {
-        bail!("source changed while writing");
-    }
-    let readback = hash_partition(device)?;
-    if readback != expected_hash {
-        bail!("full partition SHA-256 mismatch: {readback} != {expected_hash}");
-    }
-    Ok(())
+    let target_path = Path::new(&device.target_path);
+    validate_block_device(target_path, partition_name)?;
+    with_writable_block_device(target_path, || {
+        let mut source = File::open(image)?;
+        let mut target = OpenOptions::new().write(true).open(target_path)?;
+        let copied_hash = stream_copy_exact(&mut source, &mut target, image_size)?;
+        target.sync_all()?;
+        if copied_hash != expected_hash {
+            bail!("source changed while writing");
+        }
+        let readback = hash_partition(device)?;
+        if readback != expected_hash {
+            bail!("full partition SHA-256 mismatch: {readback} != {expected_hash}");
+        }
+        Ok(())
+    })
 }
 
 fn hash_partition(device: &DeviceInfo) -> Result<String> {
     let file = File::open(&device.target_path)?;
     stream_hash(file.take(device.partition_size), device.partition_size)
+}
+
+fn block_device_read_only(path: &Path) -> Result<bool> {
+    let path = path
+        .to_str()
+        .context("block-device path is not valid UTF-8")?;
+    let output = Command::new("/system/bin/toybox")
+        .args(["blockdev", "--getro", path])
+        .output()
+        .with_context(|| format!("cannot query block-device read-only state: {path}"))?;
+    if !output.status.success() {
+        bail!(
+            "blockdev --getro failed for {path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        value => bail!("unexpected blockdev --getro output for {path}: {value}"),
+    }
+}
+
+fn set_block_device_read_only(path: &Path, read_only: bool) -> Result<()> {
+    let path_text = path
+        .to_str()
+        .context("block-device path is not valid UTF-8")?;
+    let flag = if read_only { "--setro" } else { "--setrw" };
+    let output = Command::new("/system/bin/toybox")
+        .args(["blockdev", flag, path_text])
+        .output()
+        .with_context(|| format!("cannot run blockdev {flag} for {path_text}"))?;
+    if !output.status.success() {
+        bail!(
+            "blockdev {flag} failed for {path_text}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let actual = block_device_read_only(path)?;
+    if actual != read_only {
+        bail!(
+            "block-device read-only state did not change as requested for {path_text}: expected {}, got {}",
+            u8::from(read_only),
+            u8::from(actual)
+        );
+    }
+    Ok(())
+}
+
+fn with_writable_block_device<T>(
+    path: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let was_read_only = block_device_read_only(path)?;
+    if was_read_only {
+        set_block_device_read_only(path, false)?;
+    }
+
+    let operation_result = operation();
+    let restore_result = if was_read_only {
+        set_block_device_read_only(path, true)
+    } else {
+        Ok(())
+    };
+
+    match (operation_result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(restore_error)) => {
+            Err(restore_error.context("write succeeded but failed to restore block-device read-only state"))
+        }
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Err(operation_error), Err(restore_error)) => Err(operation_error.context(format!(
+            "also failed to restore block-device read-only state: {restore_error:#}"
+        ))),
+    }
 }
 
 fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
