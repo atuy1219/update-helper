@@ -79,6 +79,20 @@ class SafetyPolicyTest {
     }
 
     @Test
+    fun jsonAccessorsTreatJsonNullAsAbsent() {
+        val root = objectOf(
+            """{
+                "journal": null,
+                "message": null,
+                "valid": {"status": "ok"}
+            }""",
+        )
+        assertEquals(null, root.obj("journal"))
+        assertEquals(null, root.string("message"))
+        assertEquals("ok", root.obj("valid")?.string("status"))
+    }
+
+    @Test
     fun unfinishedJournalRequiresRecoveryScreen() {
         assertTrue(isRecoveryRequired(objectOf("""{"status":"writing"}""")))
         assertTrue(isRecoveryRequired(objectOf("""{"status":"restore_failed_do_not_reboot"}""")))
