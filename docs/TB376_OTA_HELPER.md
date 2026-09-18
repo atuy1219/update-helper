@@ -2,6 +2,18 @@
 
 ## Supported device
 
+The supported steady-state firmware baseline is TB390FU ROW across the
+Qualcomm A/B firmware partitions. The Helper no longer treats the older mixed
+TB376FC-low-level/TB390FU-Android layout as a normal operating state. The
+intentional deviations from stock ROW are the fixed PRC `vendor_boot` FDT
+patch and KernelSU's `init_boot`/`boot` patch.
+
+This baseline is an operating assumption, not a claim that every low-level
+partition is re-hashed by the Helper before each OTA. If a Qualcomm firmware
+partition was manually changed after entering the ROW baseline, differential
+OTA source validation can still fail and the exact matching TB390FU ROW source
+must be restored first.
+
 Writes are enabled only when all of the following can be verified:
 
 - root helper has effective UID 0 through KernelSU Next;
@@ -101,9 +113,17 @@ The restore is allowed only when:
 - the usual battery policy passes.
 
 Only then is the stock image streamed to the current slot, followed by `fsync`
-and a full-partition read-back SHA-256. If a write or read-back fails, the
-journal remains in `current_stock_restore_failed_do_not_reboot` and the app's
-recovery screen retries the same validated stock artifact. The backup
+and a full-partition read-back SHA-256. Before any Helper-owned block write, the
+current Linux block read-only state is queried. A read-only target is
+temporarily switched writable, the write and full read-back verification are
+performed, and the original read-only state is restored. The same preservation
+rule is used by the Kotlin KernelSU stock-restore path. If the payload write
+fails, restoration of the original block read-only state is still attempted and
+a restoration failure is attached to the operation error.
+
+If a write or read-back fails, the journal remains in
+`current_stock_restore_failed_do_not_reboot` and the app's recovery screen
+retries the same validated stock artifact. The backup
 `operation.json` is not rewritten, so it continues to describe the original
 OTA transformation used to prove the stock/PRC pair.
 
@@ -122,7 +142,9 @@ read-back hash.
 The dedicated current-slot stock restore also journals before its first write.
 It intentionally does not use the normal inactive-slot write primitive, so the
 existing `ensure_write_target` rule continues to reject active slots everywhere
-else.
+else. Read-only handling does not weaken slot targeting: it only changes the
+kernel block-device RO bit after all existing allow-list and OTA-state checks
+have passed, and restores the previous value after the transaction.
 
 The reboot button requires:
 
