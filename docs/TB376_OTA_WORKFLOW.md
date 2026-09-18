@@ -1,7 +1,10 @@
 # TB376FC ZUI OTA workflow
 
 This procedure applies to a TB376FC that already boots TB390FU ROW firmware and
-has an officially unlocked bootloader plus KernelSU Next LKM.
+has an officially unlocked bootloader plus KernelSU Next LKM. The normal
+steady-state assumption is that the Qualcomm A/B firmware partitions are also
+TB390FU ROW. The helper does not intentionally roll those low-level partitions
+back to TB376FC after an OTA.
 
 ## Before starting
 
@@ -13,6 +16,10 @@ has an officially unlocked bootloader plus KernelSU Next LKM.
 - KernelSU Next's original stock backup in `/data/adb/ksu/` must still exist.
   Differential OTA preparation deliberately refuses KernelSU's reconstructed
   fallback image because byte-for-byte stock equality cannot be proven from it.
+- Treat TB390FU ROW Qualcomm firmware as part of the stock source baseline. If
+  any low-level partition was manually changed, restore that exact build before
+  starting a differential OTA; the normal Helper flow does not convert a mixed
+  TB376FC/TB390FU low-level layout into ROW.
 
 ## Differential/incremental ZUI OTA
 
@@ -44,7 +51,9 @@ has an officially unlocked bootloader plus KernelSU Next LKM.
 14. Approve **Back up and patch update-target vendor_boot**.
 15. Wait for full-partition read-back SHA-256 verification.
 16. Export the backup to a user-selected SAF folder.
-17. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
+17. Keep the Qualcomm firmware produced by the TB390FU ROW OTA. Do not restore
+    the previous TB376FC low-level firmware as part of the normal post-OTA flow.
+18. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
     approve **Safe reboot**.
 
 ## Why KernelSU's rebuilt fallback is rejected
@@ -70,6 +79,12 @@ stock backup cannot be proven, preparation fails closed.
 If current `vendor_boot` is already a supported ROW image, no vendor_boot write
 is necessary. If it is PRC, its complete SHA-256 must match a previous
 Helper-generated PRC artifact with the corresponding ROW stock backup.
+
+Some Lenovo partitions are exposed by the running kernel with the block-device
+read-only bit set. For Helper-owned `vendor_boot` and KernelSU stock-restore
+writes, the original RO state is recorded, temporarily cleared only around the
+verified write, and restored afterward. A failure to restore that state is
+treated as an operation failure rather than ignored.
 
 ## Already PRC after OTA
 
