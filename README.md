@@ -3,8 +3,20 @@
 TB376 OTA Helper is an offline Android application for one fixed device
 profile: an officially unlocked Lenovo TB376FC (`product=malbec`,
 `hwboardid=SM8735P_8+128_22`) running TB390FU/TB390FU_PRC ROW ZUI with KernelSU
-Next LKM. KernelSU Next's **SU compatibility** setting must be enabled so the
-app can request its explicitly approved root process.
+Next LKM. The supported steady-state baseline also assumes the low-level
+Qualcomm A/B firmware partitions are the TB390FU ROW variants; the intentional
+cross-model exception is the nine-byte PRC `vendor_boot` region patch, plus the
+KernelSU-patched `init_boot`/ `boot` when root is installed. KernelSU Next's
+**SU compatibility** setting must be enabled so the app can request its
+explicitly approved root process.
+
+The Helper does not preserve or restore the older mixed state where Qualcomm
+firmware partitions came from TB376FC. Once the device is on the TB390FU ROW
+firmware baseline, future differential OTA preparation assumes those untouched
+source partitions remain stock ROW. If they were manually modified, they must
+be restored from the exact matching TB390FU ROW build before applying a
+differential OTA; the Helper currently verifies only the partitions it itself
+modifies.
 
 Before starting a differential/incremental ZUI A/B OTA, use **Prepare incremental
 OTA (restore stock)**. The app first asks KernelSU Next to restore the currently
@@ -18,8 +30,11 @@ bytes required by a differential OTA.
 The same preparation then restores the currently running slot's stock
 `vendor_boot` only when that slot exactly matches a PRC image that this Helper
 previously generated and the paired stock backup still exists. Both restored
-partitions are read back and SHA-256 verified. Once an OTA is pending, these
-active-slot restore paths are refused.
+partitions are read back and SHA-256 verified. If Android exposes a target
+block device as read-only, the Helper records that state, temporarily switches
+the device writable for the verified write, and restores the original
+read-only state afterward. Once an OTA is pending, these active-slot restore
+paths are refused.
 
 After the OTA has finished installing and the system is waiting for a reboot,
 the normal flow backs up and patches only the next boot slot's
@@ -53,7 +68,9 @@ OTA, and [docs/TB376_RECOVERY.md](docs/TB376_RECOVERY.md) before recovery.
 6. Return to TB376 OTA Helper, inspect, run Dry Run, and patch only the update
    target `vendor_boot`.
 7. Confirm full-partition read-back SHA-256 success and export the backup.
-8. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
+8. Leave the Qualcomm firmware written by the TB390FU ROW OTA in place; do not
+   roll the low-level firmware back to TB376FC as part of the normal flow.
+9. Only after both KernelSU and vendor_boot post-OTA steps succeeded, explicitly
    approve reboot in the app.
 
 If KernelSU's exact stock backup is missing, or the current PRC `vendor_boot`
