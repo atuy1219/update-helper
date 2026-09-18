@@ -606,11 +606,20 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
         "ro.boot.product",
         "ro.hardware",
     ];
-    let product = product_candidates
+    let product_values: Vec<String> = product_candidates
         .iter()
         .filter_map(|key| prop(&props, key))
-        .find(|value| value.eq_ignore_ascii_case(EXPECTED_PRODUCT))
+        .filter(|value| !value.is_empty())
+        .collect();
+    let product = product_values
+        .iter()
+        .find(|value| is_supported_product_identity(value))
+        .cloned()
+        .or_else(|| product_values.first().cloned())
         .unwrap_or_default();
+    let product_matches = product_values
+        .iter()
+        .any(|value| is_supported_product_identity(value));
     let hwboardid = detect_hwboardid(&props).unwrap_or_default();
     let system_model = [
         "ro.product.model",
@@ -634,7 +643,7 @@ fn inspect_device(requested_slot: Option<char>) -> Result<DeviceInfo> {
     let bootloader_unlocked = flash_locked == "0"
         && (verified_boot_state.eq_ignore_ascii_case("orange")
             || vbmeta_state.eq_ignore_ascii_case("unlocked"));
-    let supported_device = product.eq_ignore_ascii_case(EXPECTED_PRODUCT)
+    let supported_device = product_matches
         && hwboardid.contains(EXPECTED_HWBOARD_ID)
         && matches!(
             system_model.to_ascii_uppercase().as_str(),
@@ -856,6 +865,14 @@ fn parse_update_engine_status(text: &str) -> Option<String> {
     })
 }
 
+fn is_supported_product_identity(value: &str) -> bool {
+    value.eq_ignore_ascii_case(EXPECTED_PRODUCT)
+        || matches!(
+            value.to_ascii_uppercase().as_str(),
+            "TB390FU" | "TB390FU_PRC"
+        )
+}
+
 fn normalize_slot(value: &str) -> Option<char> {
     match value.trim().to_ascii_lowercase().as_str() {
         "0" | "a" | "_a" => Some('a'),
@@ -973,6 +990,15 @@ mod tests {
     fn parses_tb390fu_update_engine_follow_output() {
         let output = "[INFO:update_engine_client_android.cc(96)] onStatusUpdate(UPDATE_STATUS_IDLE (0), 0)\n";
         assert_eq!(parse_update_engine_status(output).as_deref(), Some(OTA_IDLE));
+    }
+
+    #[test]
+    fn accepts_crossflashed_tb390fu_product_identity() {
+        assert!(is_supported_product_identity("TB390FU"));
+        assert!(is_supported_product_identity("tb390fu_prc"));
+        assert!(is_supported_product_identity(EXPECTED_PRODUCT));
+        assert!(!is_supported_product_identity("qssi_64"));
+        assert!(!is_supported_product_identity("qcom"));
     }
 
     #[test]
