@@ -2,8 +2,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
 use tb376_ota_helper_native::{
-    ensure_write_target, inspect_image, patch_image, partition_name, stream_copy_exact,
-    stream_hash, validate_partition_size, Region,
+    ensure_write_target, inspect_image, patch_image, partition_name, reverse_patch_image_to_row,
+    stream_copy_exact, stream_hash, validate_partition_size, Region,
 };
 
 #[test]
@@ -26,6 +26,34 @@ fn row_to_prc_changes_exactly_nine_bytes_and_preserves_size() {
     let patched = fs::read(output).unwrap();
     assert_eq!(patched.len(), bytes.len());
     assert!(patched.windows(17).any(|w| w == b"unrelated_ROW_txt"));
+}
+
+#[test]
+fn prc_to_row_reverse_patch_round_trips_exactly() {
+    let temp = tempfile::tempdir().unwrap();
+    let stock = temp.path().join("stock.img");
+    let prc = temp.path().join("prc.img");
+    let restored = temp.path().join("restored-row.img");
+    let repatched = temp.path().join("repatched-prc.img");
+    let bytes = vendor_boot(&[
+        ("qcom,other", None),
+        ("qcom,tuna", Some(Region::Row)),
+        ("qcom,tuna", Some(Region::Row)),
+        ("qcom,tunap", Some(Region::Row)),
+    ]);
+    fs::write(&stock, &bytes).unwrap();
+
+    let forward = patch_image(&stock, &prc).unwrap();
+    let reverse = reverse_patch_image_to_row(&prc, &restored).unwrap();
+    assert_eq!(reverse.changed_byte_count, 9);
+    assert_eq!(reverse.changed_offsets.len(), 9);
+    assert_eq!(reverse.input_size, reverse.output_size);
+    assert_eq!(inspect_image(&restored).unwrap().region, Region::Row);
+    assert_eq!(fs::read(&restored).unwrap(), bytes);
+
+    let roundtrip = patch_image(&restored, &repatched).unwrap();
+    assert_eq!(roundtrip.output_sha256, forward.output_sha256);
+    assert_eq!(fs::read(&repatched).unwrap(), fs::read(&prc).unwrap());
 }
 
 #[test]
@@ -99,6 +127,33 @@ fn active_slot_and_non_allowlisted_partition_are_rejected() {
     assert!(ensure_write_target('a', 'b', "vbmeta_b").is_err());
     assert_eq!(partition_name('b').unwrap(), "vendor_boot_b");
     assert!(partition_name('x').is_err());
+}
+
+#[test]
+fn known_335_fixture_reverse_patch_round_trips_when_available() {
+    let Ok(fixture) = std::env::var("TB376_VENDOR_BOOT_335_ROW") else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let prc = temp.path().join("vendor_boot-prc.img");
+    let restored = temp.path().join("vendor_boot-row-restored.img");
+    let repatched = temp.path().join("vendor_boot-prc-roundtrip.img");
+
+    let forward = patch_image(std::path::Path::new(&fixture), &prc).unwrap();
+    assert_eq!(
+        forward.output_sha256,
+        tb376_ota_helper_native::KNOWN_335_PRC_SHA256
+    );
+    reverse_patch_image_to_row(&prc, &restored).unwrap();
+    assert_eq!(
+        fs::read(&restored).unwrap(),
+        fs::read(std::path::Path::new(&fixture)).unwrap()
+    );
+    let roundtrip = patch_image(&restored, &repatched).unwrap();
+    assert_eq!(
+        roundtrip.output_sha256,
+        tb376_ota_helper_native::KNOWN_335_PRC_SHA256
+    );
 }
 
 #[test]
