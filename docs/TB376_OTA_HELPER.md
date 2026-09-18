@@ -14,6 +14,12 @@ partition was manually changed after entering the ROW baseline, differential
 OTA source validation can still fail and the exact matching TB390FU ROW source
 must be restored first.
 
+The ROW low-level baseline was validated on-device by completing the
+18.0.10.335 -> 18.0.10.397_260824 differential OTA and booting the resulting
+slot with TB390FU ROW Qualcomm firmware, PRC-patched `vendor_boot`, and a
+KernelSU-patched `init_boot`. No low-level-firmware compatibility failure was
+observed in that boot.
+
 Writes are enabled only when all of the following can be verified:
 
 - root helper has effective UID 0 through KernelSU Next;
