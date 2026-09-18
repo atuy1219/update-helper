@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tb376_ota_helper_native::{
     atomic_json, block_device_size, ensure_write_target, inspect_image, inspect_image_sized,
-    partition_name, partition_path, patch_image, sha256_file, stream_copy_exact, stream_hash,
-    validate_block_device, validate_partition_size, PatchReport, Region, BACKUP_DIR,
-    EXPECTED_HWBOARD_ID, EXPECTED_PRODUCT, LOCK_PATH, ROOT_DIR, STATE_PATH,
+    partition_name, partition_path, patch_image, reverse_patch_image_to_row, sha256_file,
+    stream_copy_exact, stream_hash, validate_block_device, validate_partition_size, PatchReport,
+    Region, BACKUP_DIR, EXPECTED_HWBOARD_ID, EXPECTED_PARTITION_SIZE_335, EXPECTED_PRODUCT,
+    KNOWN_335_PRC_SHA256, LOCK_PATH, ROOT_DIR, STATE_PATH,
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -280,7 +281,20 @@ fn restore_current_stock() -> Result<()> {
         if fdt.region != Region::Prc {
             bail!("current vendor_boot is not a supported PRC image");
         }
-        let mut operation = find_current_stock_backup(&device, &current_hash)?;
+        let mut operation = match find_current_stock_backup(&device, &current_hash) {
+            Ok(operation) => operation,
+            Err(lookup_error)
+                if current_hash.eq_ignore_ascii_case(KNOWN_335_PRC_SHA256)
+                    && device.partition_size == EXPECTED_PARTITION_SIZE_335 =>
+            {
+                prepare_known_335_current_stock_backup(&device, &current_hash).with_context(|| {
+                    format!(
+                        "known 18.0.10.335 PRC vendor_boot matched, but verified ROW derivation failed after backup lookup error: {lookup_error:#}"
+                    )
+                })?
+            }
+            Err(error) => return Err(error),
+        };
         operation.tool_version = TOOL_VERSION.to_string();
         operation.timestamp = now();
         operation.serial = device.serial.clone();
@@ -340,6 +354,78 @@ fn restore_current_stock() -> Result<()> {
             bail!("現在slotのstock vendor_boot復元に失敗しました 再起動しないでください: {error:#}")
         }
     }
+}
+
+fn prepare_known_335_current_stock_backup(
+    device: &DeviceInfo,
+    current_hash: &str,
+) -> Result<Operation> {
+    if !current_hash.eq_ignore_ascii_case(KNOWN_335_PRC_SHA256) {
+        bail!("current vendor_boot does not match the known 18.0.10.335 PRC SHA-256");
+    }
+    if device.partition_size != EXPECTED_PARTITION_SIZE_335 {
+        bail!(
+            "known 18.0.10.335 vendor_boot size mismatch: {} != {}",
+            device.partition_size,
+            EXPECTED_PARTITION_SIZE_335
+        );
+    }
+
+    fs::create_dir_all(BACKUP_DIR)?;
+    let backup_dir = new_backup_dir(device.current_slot);
+    validate_backup_dir(&backup_dir, false)?;
+    fs::create_dir(&backup_dir)?;
+
+    let patched = backup_dir.join(patched_name(device.current_slot));
+    let stock = backup_dir.join(stock_name(device.current_slot));
+    let roundtrip = backup_dir.join("vendor_boot-roundtrip-prc.img");
+
+    let patched_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&patched)?;
+    let copied_hash = stream_copy_exact(
+        File::open(&device.target_path)?,
+        &patched_file,
+        device.partition_size,
+    )?;
+    patched_file.sync_all()?;
+    if !copied_hash.eq_ignore_ascii_case(current_hash) {
+        bail!("current vendor_boot changed while capturing the known PRC image");
+    }
+    if !sha256_file(&patched)?.eq_ignore_ascii_case(KNOWN_335_PRC_SHA256) {
+        bail!("captured PRC backup does not match the known 18.0.10.335 digest");
+    }
+
+    let reverse = reverse_patch_image_to_row(&patched, &stock)?;
+    if reverse.changed_byte_count != 9
+        || reverse.changed_offsets.len() != 9
+        || reverse.supported_fdt_count != 3
+        || reverse.input_size != EXPECTED_PARTITION_SIZE_335
+        || reverse.output_size != EXPECTED_PARTITION_SIZE_335
+    {
+        bail!("known PRC reverse patch did not satisfy the fixed 9-byte transformation");
+    }
+
+    let report = patch_image(&stock, &roundtrip)?;
+    if report.already_prc
+        || report.changed_byte_count != 9
+        || report.changed_offsets.len() != 9
+        || report.supported_fdt_count != 3
+        || !report.output_sha256.eq_ignore_ascii_case(KNOWN_335_PRC_SHA256)
+        || sha256_file(&roundtrip)? != sha256_file(&patched)?
+    {
+        bail!("derived ROW image failed exact ROW->PRC round-trip verification");
+    }
+    fs::remove_file(&roundtrip)?;
+
+    let mut operation = operation_from(device, &backup_dir, &report);
+    operation.status = "current_stock_restore_prepared".to_string();
+    operation.next_boot_slot = device.current_slot.to_string();
+    operation.target_partition = partition_name(device.current_slot)?.to_string();
+    write_operation_files(device, &operation)?;
+    Ok(operation)
 }
 
 fn find_current_stock_backup(device: &DeviceInfo, current_hash: &str) -> Result<Operation> {

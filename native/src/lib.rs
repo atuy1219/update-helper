@@ -317,6 +317,76 @@ pub fn patch_image(input: &Path, output: &Path) -> Result<PatchReport> {
     })
 }
 
+pub fn reverse_patch_image_to_row(input: &Path, output: &Path) -> Result<PatchReport> {
+    let input_file = File::open(input)?;
+    let input_size = input_file.metadata()?.len();
+    let input_map = unsafe { Mmap::map(&input_file)? };
+    let source = validate_supported_fdt_set(&input_map)?;
+    if source.region != Region::Prc {
+        bail!("reverse patch requires a PRC image");
+    }
+    let input_sha256 = sha256_file(input)?;
+    drop(input_map);
+
+    let output_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    stream_copy_exact(File::open(input)?, &output_file, input_size)?;
+    output_file.sync_all()?;
+
+    let mut output_map = unsafe { MmapMut::map_mut(&output_file)? };
+    let before = validate_supported_fdt_set(&output_map)?;
+    let mut changed_offsets = Vec::with_capacity(9);
+    for value_offset in &before.region_value_offsets {
+        let start = usize::try_from(*value_offset)?;
+        if output_map.get(start..start + 4) != Some(b"PRC\0") {
+            bail!("region,country changed before reverse patch at 0x{start:X}");
+        }
+        for delta in 0..3 {
+            if b"PRC"[delta] != b"ROW"[delta] {
+                changed_offsets.push((start + delta) as u64);
+            }
+        }
+        output_map[start..start + 4].copy_from_slice(b"ROW\0");
+    }
+    output_map.flush()?;
+    drop(output_map);
+    output_file.sync_all()?;
+
+    let output_size = output_file.metadata()?.len();
+    if input_size != output_size || changed_offsets.len() != 9 {
+        bail!(
+            "unsafe reverse patch: size {input_size}->{output_size}, changed bytes {}",
+            changed_offsets.len()
+        );
+    }
+    let verified = inspect_image(output)?;
+    if verified.region != Region::Row
+        || verified.supported_fdt_count != 3
+        || verified.tuna_count != 2
+        || verified.tunap_count != 1
+    {
+        bail!("reverse-patched image failed FDT revalidation");
+    }
+    let output_sha256 = sha256_file(output)?;
+    Ok(PatchReport {
+        source_region: Region::Prc,
+        target_region: Region::Row,
+        supported_fdt_count: 3,
+        tuna_count: 2,
+        tunap_count: 1,
+        changed_byte_count: changed_offsets.len(),
+        changed_offsets,
+        input_size,
+        output_size,
+        input_sha256,
+        output_sha256,
+        already_prc: false,
+    })
+}
+
 fn validate_supported_fdt_set(data: &[u8]) -> Result<FdtReport> {
     let mut supported = Vec::new();
     let mut cursor = 0_usize;
