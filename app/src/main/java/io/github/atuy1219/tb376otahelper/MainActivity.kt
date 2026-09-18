@@ -75,7 +75,7 @@ private fun HelperApp(vm: MainViewModel = viewModel()) {
     ) {
         Text("TB376 OTA Helper", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "差分OTA前は「差分OTA準備」でKernelSU Nextが変更したinit_boot/bootと現在OSのvendor_bootをstockへ戻して全体検証します。OTA適用後は「再起動してください」で止め、更新先vendor_bootだけをPRC化します。vbmeta・superには触れません。",
+            "Qualcomm firmwareはTB390FU ROWを通常状態として扱います。差分OTA前は「差分OTA準備」でKernelSU Nextが変更したinit_boot/bootと現在OSのvendor_bootだけをstockへ戻して全体検証します。OTA適用後は「再起動してください」で止め、更新先vendor_bootだけをPRC化します。vbmeta・superには触れません。",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -281,6 +281,7 @@ private fun StatusCard(state: UiState) {
             Status("OTA再起動待ち", if (d != null && d.string("current_slot") != d.string("next_boot_slot")) "Yes" else "No/未検査")
             Status("KernelSU Next", if (state.kernelsuPackages.isNotEmpty()) "Manager検出" else "確認できません")
             Status("KernelSUカーネル状態", d?.bool("kernelsu_next_present")?.let { if (it) "検出" else "確認できません" } ?: "—")
+            Status("Qualcomm FW基準", d?.string("qualcomm_firmware_baseline") ?: "—")
             Status("差分OTA準備", if (state.otaReady) "完了 / 再起動せずOTA開始" else "未完了")
             Status("KSU stock復元対象", state.ksuStockPartition ?: "—")
             Status("KSU stock SHA-256", state.ksuStockSha256 ?: "—")
